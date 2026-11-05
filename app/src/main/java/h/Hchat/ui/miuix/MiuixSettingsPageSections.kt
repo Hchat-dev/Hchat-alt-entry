@@ -358,7 +358,6 @@ import h.Hchat.hooks.items.moments.MomentsKeywordBlockSettings
 import h.Hchat.hooks.items.moments.MomentsPostNotificationFeature
 import h.Hchat.hooks.items.moments.MomentsPostNotificationSettings
 import h.Hchat.hooks.items.moments.MomentsUploadTailFeature
-import h.Hchat.hooks.items.moments.MomentsUploadTailPresets
 import h.Hchat.hooks.items.moments.MomentsUploadTailSettings
 import h.Hchat.hooks.items.moments.RemoveMomentsAdsFeature
 import h.Hchat.hooks.items.moments.RemoveMomentsAdsSettings

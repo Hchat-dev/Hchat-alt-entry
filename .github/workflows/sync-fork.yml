@@ -5,6 +5,10 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:
 
+# 关键修复：在此处添加 permissions 字段
+permissions:
+  contents: write  # 允许 Actions 写入代码到仓库
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -29,4 +33,3 @@ jobs:
         uses: ad-m/github-push-action@master
         with:
           branch: alt-entry
-          github_token: ${{ secrets.GITHUB_TOKEN }}

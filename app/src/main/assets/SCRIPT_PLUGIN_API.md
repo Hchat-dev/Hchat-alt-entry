@@ -1,6 +1,6 @@
 # Hchat 脚本插件接口
 
-本文档给插件作者使用。Hchat 脚本插件采用 WA 风格，脚本文件是 BeanShell 写法，文件名固定为 `main.java`。少量接口会比 WA 多返回 `boolean`；脚本不接收返回值时仍可直接调用。
+本文档给插件作者使用。Hchat 脚本插件采用 WA 风格，脚本文件是 BeanShell 写法，文件名固定为 `main.java`。解释器仅使用 BeanShell-Rust，模块不附带 Java BeanShell 引擎，也不在 Rust 加载失败时回退；失败会报告原始错误。插件 API 的 Java/Kotlin 桥接对象仍由模块提供，这些对象不是另一套解释器。少量接口会比 WA 多返回 `boolean`；脚本不接收返回值时仍可直接调用。
 
 插件 Agent 只能把本文档、内置开发指南及当前运行时/工具结果明确确认的内容当作事实。能力、可用性或限制没有明确依据时，必须说明未知或需要运行时验证，不得猜测。
 
@@ -1714,6 +1714,8 @@ void downloadFinderMedia(Object finderFeedOrMessage, int mediaIndex, String save
 - `compileSnapshot(String path)` 当前会在源脚本旁边生成同名 `.bshs` 快照文件，例如 `main.java.bshs`。
 - `evalSnapshot(String path)` / `evalSnapshot(InputStream inputStream)` / `evalSnapshot(byte[] data)` 只执行 `.bshs` 加密快照；快照使用模块内置兼容 AES 密钥，可在不同插件目录间加载。
 - `compileSnapshot` / `evalSnapshot` 可以在脚本顶层代码和 `onLoad()` 中调用，不要求插件先完成加载登记。
+- 新快照保存 Rust 解析后的 AST 并使用 AES-GCM 加密认证，不以明文源码副本代替快照；错误密钥或篡改数据会在执行前拒绝。旧 Java BeanShell 生成的 `.bshs` 不兼容，需要使用原始脚本重新调用 `compileSnapshot`，模块不会转入 Java 执行。输入流重载不会关闭调用方传入的流。
+- `__hchat_interpreter` 暴露 Rust 适配对象的 `eval/set/get/unset/source/addClassLoader/compileSnapshot/evalSnapshot` 方法，不再是 `bsh.Interpreter`；直接依赖 `bsh.*` 内部类型或旧 `nameSpace` 的插件需要修改。
 - 如果 `main.java` 只是入口包装，真正的回调定义在 `eval(String code)`、`evalSnapshot()` 或 `loadJava()` 加载的文件里，模块会在执行后刷新并识别这些回调；入口顶层异步加载时也会在插件登记后补充扫描，避免回调因加载时序丢失。
 - 如果加载进来的方法不是标准回调名，可以在顶层用 `useCallback(...)` 或 `useOnHandleMsg(...)` 这类别名接口绑定。
 - `loadJava` 支持绝对路径；相对路径从当前插件目录开始找。

@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/bsh-syntax", "crates/bsh-jvm", "crates/bsh-runtime", "crates/bsh-cli", "crates/bsh-rs"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.75"
+repository = "https://github.com/Lspilot/BeanShell-Rust"
+
+[workspace.dependencies]
+bsh-syntax = { path = "crates/bsh-syntax" }
+bsh-jvm = { path = "crates/bsh-jvm" }
+bsh-runtime = { path = "crates/bsh-runtime" }
+serde = { version = "=1.0.197", features = ["derive"] }
+bincode = "=1.3.3"
+
+[patch.crates-io]
+serde = { path = "vendor/serde-1.0.197" }
+serde_derive = { path = "vendor/serde_derive-1.0.197" }
+bincode = { path = "vendor/bincode-1.3.3" }
+syn = { path = "vendor/syn-2.0.58" }
+quote = { path = "vendor/quote-1.0.35" }
+proc-macro2 = { path = "vendor/proc-macro2-1.0.79" }
+unicode-ident = { path = "vendor/unicode-ident-1.0.12" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

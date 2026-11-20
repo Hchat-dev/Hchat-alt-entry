@@ -41,6 +41,10 @@ public class NativeLibraryLoader {
         loadLibrary(ctx, moduleClassLoader, DEXKIT_SO, DEXKIT_LIB, false);
     }
 
+    public void loadRustBsh(Context ctx, ClassLoader moduleClassLoader) {
+        loadLibrary(ctx, moduleClassLoader, "libbsh_rs.so", "bsh_rs", false);
+    }
+
     public boolean loadSilkCodec(Context ctx, ClassLoader moduleClassLoader) {
         return loadLibrary(ctx, moduleClassLoader, SILK_CODEC_SO, SILK_CODEC_LIB, true);
     }

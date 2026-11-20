@@ -9,7 +9,8 @@ import android.os.Process
 import android.os.SystemClock
 import android.system.Os
 import android.widget.Toast
-import bsh.Interpreter
+import h.Hchat.hooks.items.script.engine.RustScriptInterpreter as Interpreter
+import h.Hchat.hooks.items.script.engine.RustScriptLibrary
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -254,6 +255,7 @@ object ScriptPluginRuntime {
     fun install(context: FeatureContext) {
         val hostAppContext = context.hostContext().applicationContext ?: context.hostContext()
         appContext = hostAppContext
+        RustScriptLibrary.prepare(hostAppContext)
         runtimeProcess = PROCESS_MAIN
         runtimeProcessName = hostAppContext.packageName
         val currentBridge = ScriptPluginBridge.from(context)
@@ -276,6 +278,7 @@ object ScriptPluginRuntime {
         if (!hasEnabledAppBrandPlugin(hostAppContext)) return
         if (!initialLoadStarted.compareAndSet(false, true)) return
         appContext = hostAppContext
+        RustScriptLibrary.prepare(hostAppContext)
         runtimeProcess = PROCESS_APPBRAND
         runtimeProcessName = processName.orEmpty()
         val currentBridge = ScriptPluginBridge(
@@ -1538,6 +1541,7 @@ object ScriptPluginRuntime {
         if (forceReload) unloadPlugin(plugin.id)
         if (loadedPlugins.containsKey(plugin.id)) return Result.success(Unit)
         var pendingWaBridge: ScriptWaBridge? = null
+        var pendingInterpreter: Interpreter? = null
         return runCatching {
             val prefs = HchatStorage.preferences(context, ScriptPluginSettings.PREFS_NAME)
             if (!prefs.getBoolean(ScriptPluginSettings.KEY_ENABLE, ScriptPluginSettings.DEFAULT_ENABLE)) {
@@ -1550,6 +1554,7 @@ object ScriptPluginRuntime {
             pendingWaBridge = waBridge
             waBridge.bindPluginLog(plugin.name, plugin.dir)
             val interpreter = newInterpreter(currentBridge, plugin, waBridge)
+            pendingInterpreter = interpreter
             withInterpreterLock(interpreter) {
                 interpreter.source(plugin.mainFile.absolutePath)
             }
@@ -1585,6 +1590,7 @@ object ScriptPluginRuntime {
             notifyPluginCatalogChanged()
         }.onFailure {
             pendingWaBridge?.dispose()
+            pendingInterpreter?.let { closeInterpreter(it, plugin.id) }
             loadedPlugins.remove(plugin.id)
             if (!hasHandleMsgCallbacks()) ScriptMessageHook.clearPendingMessages()
             updateProtobufPacketListener()
@@ -1607,7 +1613,11 @@ object ScriptPluginRuntime {
         }.onFailure {
             h.Hchat.utils.HLog.e("$TAG 插件卸载回调失败: ${loaded.plugin.name} ${it.message}", it)
         }
-        bridge?.unhookPlugin(pluginId)
+        try {
+            bridge?.unhookPlugin(pluginId)
+        } finally {
+            closeInterpreter(loaded.interpreter, pluginId)
+        }
         notifyPluginCatalogChanged()
         return Result.success(Unit)
     }
@@ -1650,7 +1660,19 @@ object ScriptPluginRuntime {
         val hostVerName = version?.versionName.orEmpty()
         val hostVerCode = version?.versionCode ?: 0L
         val hostVerClient = version?.clientVersion.orEmpty()
-        return Interpreter().apply {
+        RustScriptLibrary.prepare(currentBridge.hostContext)
+        val interpreter = Interpreter()
+        return try { interpreter.apply {
+            setCallbackErrorHandler { method, error ->
+                h.Hchat.utils.HLog.e("$TAG [${plugin.name}] 脚本回调失败: $method", error)
+                runCatching {
+                    val trace = java.io.StringWriter()
+                    error.printStackTrace(java.io.PrintWriter(trace))
+                    File(plugin.dir, "log.txt").appendText("\nERROR 脚本回调失败: $method\n$trace\n")
+                }.onFailure {
+                    h.Hchat.utils.HLog.e("$TAG 写入脚本回调错误失败: ${plugin.name}", it)
+                }
+            }
             addClassLoader(currentBridge.classLoader)
             set("context", currentBridge.hostContext)
             set("hostContext", currentBridge.hostContext)
@@ -2063,6 +2085,9 @@ object ScriptPluginRuntime {
                 void downloadFinderMedia(Object finderFeedOrMessage, int mediaIndex, String savePath, PluginCallBack.DownloadCallback callback) { wa.downloadFinderMedia(finderFeedOrMessage, mediaIndex, savePath, callback); }
             """.trimIndent()
             )
+        } } catch (error: Throwable) {
+            closeInterpreter(interpreter, plugin.id)
+            throw error
         }
     }
 
@@ -2122,18 +2147,16 @@ object ScriptPluginRuntime {
     }
 
     private fun callLifecycle(interpreter: Interpreter, name: String) {
+        withInterpreterLock(interpreter) {
+            if (name in interpreter.methods()) interpreter.eval("$name();")
+        }
+    }
+
+    private fun closeInterpreter(interpreter: Interpreter, pluginId: String) {
         runCatching {
-            withInterpreterLock(interpreter) {
-                interpreter.eval("$name();")
-            }
+            interpreter.close()
         }.onFailure {
-            val message = it.message.orEmpty()
-            if (!message.contains("Command not found", ignoreCase = true)
-                && !message.contains("undefined", ignoreCase = true)
-                && !message.contains("not found", ignoreCase = true)
-            ) {
-                throw it
-            }
+            h.Hchat.utils.HLog.e("$TAG 释放 Rust 脚本引擎失败: $pluginId", it)
         }
     }
 
@@ -2453,7 +2476,7 @@ object ScriptPluginRuntime {
 
     private fun detectCallbacks(interpreter: Interpreter): CallbackFlags {
         val methods = runCatching {
-            interpreter.nameSpace.methods.map { it.name }.toSet()
+            interpreter.methods()
         }.getOrDefault(emptySet())
         return CallbackFlags(
             hasSendButton = "onClickSendBtn" in methods,

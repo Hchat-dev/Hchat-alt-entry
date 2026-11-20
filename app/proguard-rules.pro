@@ -4,8 +4,11 @@
 # Miuix Nav/Compose resolves this composition local from library bytecode.
 -keep class androidx.lifecycle.viewmodel.compose.** { *; }
 
-# BeanShell 用户脚本引擎
--keep class bsh.** { *; }
+# Rust BeanShell 的 JNI、反射桥与插件可见接口
+-keep class me.yun.bsh.rust.** { *; }
+-keep class bshrs.** { *; }
+-keep class h.Hchat.hooks.items.script.engine.RustScriptInterpreter { *; }
+-keep class h.Hchat.hooks.items.script.engine.RustScriptInterpreter$* { *; }
 
 # Android Xml API 返回系统 XmlPullParser 实现，接口 ABI 不能重命名或收窄
 -keep class org.xmlpull.v1.** { *; }

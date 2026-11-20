@@ -1,6 +1,6 @@
 package h.Hchat.hooks.items.script.agent
 
-import bsh.ScriptSyntaxValidator
+import h.Hchat.hooks.items.script.engine.RustScriptSyntaxValidator as ScriptSyntaxValidator
 import h.Hchat.utils.HLog
 import java.io.StringReader
 import java.util.Properties
@@ -157,6 +157,12 @@ object ScriptPluginAgentValidator {
         } catch (error: StackOverflowError) {
             HLog.e("[Hchat:ScriptAgent] BeanShell 语法嵌套过深: $path", error)
             return ScriptPluginAgentIssue(ScriptPluginAgentIssueLevel.ERROR, "$path 语法嵌套过深，无法完成检查")
+        } catch (error: LinkageError) {
+            HLog.e("[Hchat:ScriptAgent] Rust 语法检查引擎加载失败: $path", error)
+            return ScriptPluginAgentIssue(
+                ScriptPluginAgentIssueLevel.ERROR,
+                "$path 无法加载 Rust 语法检查引擎：${error.message}"
+            )
         }
         val error = result.error ?: return null
         val originalLines = code.lines()

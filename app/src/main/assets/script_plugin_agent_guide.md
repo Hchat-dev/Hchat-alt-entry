@@ -4,6 +4,8 @@
 
 ## 文件、生命周期和回调
 
+解释执行与语法检查仅使用 Rust BeanShell，不保留 Java BeanShell 引擎或回退。脚本文件名和公开插件接口保持不变；不要使用 `bsh.Interpreter`、`bsh.NameSpace` 等旧实现类型。新 `.bshs` 是 AES-GCM 加密的 Rust AST，旧 Java AST 快照必须从源码重新生成，不能改后缀或按源码直接执行。
+
 每个插件位于 `Hchat/脚本插件/<插件目录>/`，必须有 `main.java`，可选 `info.prop`、`README.md`、`config.prop`。`info.prop` 至少包含 `name`、`author`、`version`。插件由用户手动开启，生成代码不能自动启用自己。
 
 `info.prop` 的 `process` 决定加载进程：默认 `process=main`；需要 Hook 小程序进程时写 `process=appbrand`；同一插件确实要在两类进程分别执行时写 `process=all`。不要把普通消息回调、定时任务或自动回复插件设成 `all`。小程序进程只提供轻量 Hook 运行时，没有主进程联系人/消息数据库和 DexKit 就绪状态；必须使用稳定完整类名、当前 `classLoader`、反射和 Hook API，不得在小程序进程新建 DexKit。

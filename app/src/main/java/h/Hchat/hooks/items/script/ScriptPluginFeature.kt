@@ -14,6 +14,7 @@ class ScriptPluginFeature : BaseFeature() {
     override fun name(): String = "脚本插件"
 
     override fun onFeatureInit(context: FeatureContext) {
+        h.Hchat.hooks.items.script.engine.RustScriptLibrary.prepare(context.hostContext())
         registerSettingsProvider(ScriptPluginSettingsProvider())
     }
 

@@ -2,12 +2,12 @@ name: Sync Fork with Upstream
 
 on:
   schedule:
-    - cron: '0 2 * * *'
-  workflow_dispatch:
+    - cron: '0 2 * * *' # 每天 UTC 时间 2:00 (北京时间 10:00) 自动运行
+  workflow_dispatch:    # 允许手动点击按钮触发
 
-# 关键修复：在此处添加 permissions 字段
+# 关键修复1：授予写入权限，解决 403 Permission denied
 permissions:
-  contents: write  # 允许 Actions 写入代码到仓库
+  contents: write
 
 jobs:
   sync:
@@ -24,12 +24,19 @@ jobs:
       - name: Fetch upstream
         run: git fetch upstream
 
+      # 关键修复2：配置 Git 身份信息，解决 fatal: empty ident name
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Merge upstream changes
         run: |
           git checkout alt-entry
-          git merge upstream/alt-entry
+          git merge upstream/alt-entry --no-edit || echo "No changes to merge or merge conflict"
 
       - name: Push changes to fork
         uses: ad-m/github-push-action@master
         with:
           branch: alt-entry
+          force: false

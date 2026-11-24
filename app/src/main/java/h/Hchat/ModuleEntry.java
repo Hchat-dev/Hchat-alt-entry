@@ -4,13 +4,16 @@ import android.app.Application;
 import android.content.Context;
 import android.os.Process;
 
+import androidx.annotation.NonNull;
+
 import h.Hchat.crash.CrashReportRuntime;
+import h.Hchat.compat.RuntimeHooks;
 import h.Hchat.dexkit.DexFinder;
 import h.Hchat.hooks.api.media.WeChatImageApi;
-import h.Hchat.hooks.core.FeatureRegistry;
-import h.Hchat.hooks.core.FeatureContext;
 import h.Hchat.hooks.core.DexInstallScheduler;
+import h.Hchat.hooks.core.FeatureContext;
 import h.Hchat.hooks.core.FeatureManager;
+import h.Hchat.hooks.core.FeatureRegistry;
 import h.Hchat.hooks.core.HookRegistry;
 import h.Hchat.hooks.items.fakelocation.FakeLocationFeature;
 import h.Hchat.hooks.items.custombottombar.CustomBottomBarFeature;
@@ -40,24 +43,37 @@ import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
+import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface;
+
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * 模块入口。
+ * 模块入口（LibXposed API 102）。
  *
  * 启动流程：
- * 1. handleLoadPackage → 过滤目标包 + 目标进程
+ * 1. onPackageReady → 过滤目标包 + 目标进程
  * 2. 小程序子进程安装必要的缓存 Hook 和显式声明的小程序脚本插件
  * 3. 主进程在 Tinker attach 后优先安装自定义底栏 Hook
  * 4. Application.onCreate 后异步初始化完整模块
  *
  * 进程过滤：普通功能只在微信主进程加载；:appbrand* 使用独立的轻量运行时。
+ *
+ * 迁移说明（Xposed API 82 → LibXposed API 102）：
+ * - 入口从 `IXposedHookLoadPackage.handleLoadPackage` 改为继承 {@link XposedModule}
+ *   并覆写 {@link XposedModuleInterface#onPackageReady}；
+ * - 旧 `XC_LoadPackage.LoadPackageParam` 的四个字段（packageName / processName /
+ *   classLoader / appInfo）由 `PackageReadyParam` 一一对应提供，兼容层
+ *   `de.robv.android.xposed.callbacks.XC_LoadPackage` 负责拼装，
+ *   因此模块内部 25 处 `lpparam.*` 引用无需改动；
+ * - `XC_MethodHook` / `XposedBridge` / `XposedHelpers` 保留旧类名，但实现全部
+ *   改走 LibXposed 的 `hook(...).intercept(chain)` 与 Invoker（见 de.robv.android.xposed 包）；
+ * - `assets/xposed_init` 改为 `META-INF/xposed/java_init.list`。
  */
-public class ModuleEntry implements IXposedHookLoadPackage {
+public class ModuleEntry extends XposedModule {
     private static final String TAG = "[Hchat:Entry]";
     private static final String WECHAT_PKG = "com.tencent.mm";
     private static final Object DEXKIT_CREATE_LOCK = new Object();
@@ -97,8 +113,37 @@ public class ModuleEntry implements IXposedHookLoadPackage {
     private FeatureManager featureManager;
     private FeatureContext featureContext;
 
+    /** 进程名：onModuleLoaded 时记录，供 lpparam 拼装使用。 */
+    @NonNull
+    private String processName = "";
+
+    public ModuleEntry() {
+        // LibXposed 反射实例化入口：先无参构造，再由框架 attachFramework 注入。
+    }
+
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
+    public void onModuleLoaded(@NonNull XposedModuleInterface.ModuleLoadedParam loadedParam) {
+        super.onModuleLoaded(loadedParam);
+        processName = loadedParam.getProcessName();
+        // 兼容层绑定：XC_MethodHook / XposedBridge 等旧入口在底层全部转走 LibXposed。
+        RuntimeHooks.INSTANCE.bind(this);
+        RuntimeHooks.INSTANCE.log("[Hchat:Entry] onModuleLoaded: " + processName);
+    }
+
+    @Override
+    public void onPackageReady(@NonNull XposedModuleInterface.PackageReadyParam readyParam) {
+        // 拼装旧 LoadPackageParam：字段一一对应，25 处 lpparam.* 引用无需改动。
+        XC_LoadPackage.LoadPackageParam lpparam = new XC_LoadPackage.LoadPackageParam(
+                readyParam.getPackageName(),
+                processName,
+                readyParam.getClassLoader(),
+                readyParam.getApplicationInfo(),
+                readyParam.isFirstPackage());
+        handleLoadPackage(lpparam);
+    }
+
+    /** 兼容旧 handleLoadPackage 的主流程；包名/进程过滤逻辑保持不变。 */
+    private void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
         // 1. 包名过滤
         if (!isWeChatPackage(lpparam.packageName)) return;
         if (!Process.is64Bit()) {
@@ -134,7 +179,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                 "onCreate",
                 new XC_MethodHook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         Application app = (Application) param.thisObject;
                         if (TermsGate.INSTANCE.isAccepted(app)) {
                             CrashReportRuntime.prepare(app);
@@ -142,7 +187,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                     }
 
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    public void afterHookedMethod(MethodHookParam param) {
                         Application app = (Application) param.thisObject;
                         if (TermsGate.INSTANCE.isAccepted(app)) {
                             CrashReportRuntime.install(app, ModuleEntry.this.getClass().getClassLoader());
@@ -217,7 +262,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                     long.class,
                     new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             Context context = (Context) param.args[0];
                             ClassLoader loader = resolveTinkerClassLoader(param.thisObject);
                             if (loader == null) {
@@ -236,7 +281,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                     "onCreate",
                     new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             Application app = (Application) param.thisObject;
                             ClassLoader loader = resolveHostClassLoader(app, lpparam);
                             installAppBrandProcessHook(app, loader, lpparam, true);
@@ -296,12 +341,12 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                     long.class,
                     new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        public void beforeHookedMethod(MethodHookParam param) {
                             installHotUpdateForAttach(lpparam, param, "before");
                         }
 
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             installHotUpdateForAttach(lpparam, param, "after");
                         }
                     }
@@ -356,12 +401,12 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                     long.class,
                     new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        public void beforeHookedMethod(MethodHookParam param) {
                             installTabletHookForAttach(lpparam, param, "before");
                         }
 
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             installTabletHookForAttach(lpparam, param, "after");
                         }
                     }
@@ -382,7 +427,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                     long.class,
                     new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             Context context = (Context) param.args[0];
                             ClassLoader classLoader = resolveTinkerClassLoader(param.thisObject);
                             if (classLoader == null) {
@@ -489,20 +534,13 @@ public class ModuleEntry implements IXposedHookLoadPackage {
 
     private void initModule(Context hostContext, XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            // 0. 尽早恢复「记录运行日志」开关，让启动阶段的日志也能进缓冲。
-            // 默认关闭，关闭时这里只是一次配置读取，不产生任何额外开销。
+            // 0. 尽早恢复日志存储（崩溃证据与看门狗面包屑仍依赖它），此时只是一次配置读取。
             HLog.initCapture(hostContext);
-            // 此处运行在 Hchat-Init 后台线程，等待异步恢复开关后再初始化启动诊断。
-            HLog.flushCapture();
-            // 计时器跟随同一个开关：用户开了"记录运行日志"，就顺带记录启动各阶段耗时。
-            h.Hchat.utils.StartupTimer.setEnabled(HLog.isCaptureEnabled());
-            h.Hchat.utils.StartupTimer.mark("initModule开始");
 
             // 1. 加载 Native 库（DexKit）
             NativeLibraryLoader nativeLibraryLoader = new NativeLibraryLoader();
             nativeLibraryLoader.loadDexKit(hostContext, getClass().getClassLoader());
             nativeLibraryLoader.loadSilkCodec(hostContext, getClass().getClassLoader());
-            h.Hchat.utils.StartupTimer.mark("Native库加载完成");
 
             // 2. 创建模块自身 Context
             Context moduleContext = createModuleContext(hostContext);
@@ -514,9 +552,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                 // 3. 初始化 DexKit。优先使用 Tinker 之后的运行时 ClassLoader。
                 String apkPath = lpparam.appInfo.sourceDir;
                 ClassLoader hostClassLoader = resolveHostClassLoader(hostContext, lpparam);
-                h.Hchat.utils.StartupTimer.mark("DexKit桥创建(全量dex解析)");
                 DexKitBridge dexKit = createDexKitBridge(hostClassLoader, apkPath);
-                h.Hchat.utils.StartupTimer.mark("DexFinder构造完成");
                 DexFinder finder = new DexFinder(dexKit, hostClassLoader, hostContext);
                 WeChatImageApi.installMarsCdnManagerHook(
                         finder.marsCdnManagerClass,
@@ -543,10 +579,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
 
                 // 6. 注册并安装所有功能模块
                 featureManager = FeatureRegistry.createDefaultManager();
-                long installStart = System.currentTimeMillis();
                 featureManager.installAll(featureContext);
-                h.Hchat.utils.StartupTimer.mark("全部功能安装完成(耗时" +
-                        (System.currentTimeMillis() - installStart) + "ms)");
 
                 // 6.5 后台预热设置页 UI 依赖的 Compose/miuix 类：
                 // 设置页首次打开要在微信进程主线程加载几百个类，是「进设置页卡一下」
@@ -563,9 +596,6 @@ public class ModuleEntry implements IXposedHookLoadPackage {
 
                 // 7. 防崩兜底：微信 8.0.76 消息描述文本方法对 null 调 isEmpty() 崩溃（收到特殊小程序电商卡片消息触发）
                 installMsgDescTextFallback(finder);
-                h.Hchat.utils.StartupTimer.mark("初始化全部完成");
-                // 后台线程一次性输出完整耗时链，不在主线程写日志污染测量。
-                h.Hchat.utils.StartupTimer.dumpIfEnabled("[Hchat:Entry]");
             });
 
         } catch (Throwable e) {
@@ -592,7 +622,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                             m.getDeclaringClass(), m.getName(), Context.class, boolean.class,
                             new XC_MethodHook() {
                                 @Override
-                                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                public void beforeHookedMethod(MethodHookParam param) throws Throwable {
                                     try {
                                         // 绝不能用 Method.invoke：反射调用仍会经过 hook 入口，
                                         // 形成 before → invoke → before 的无限递归，直到 StackOverflowError。

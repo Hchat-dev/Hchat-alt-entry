@@ -75,7 +75,7 @@ public class RedPacketFakePacketHook {
                     if (!hookedDesc.add(desc)) continue;
                     HookRegistry.get().hook(method, new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        public void beforeHookedMethod(MethodHookParam param) {
                             handlePacketTamperBeforeDispatch(param);
                         }
                     });
@@ -365,7 +365,7 @@ public class RedPacketFakePacketHook {
                     if (method.getParameterTypes().length != 3) continue;
                     HookRegistry.get().hook(method, new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             fixFakePacketResponse(param.thisObject);
                         }
                     });

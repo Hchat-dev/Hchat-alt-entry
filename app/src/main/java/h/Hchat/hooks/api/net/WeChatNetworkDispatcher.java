@@ -152,7 +152,7 @@ public class WeChatNetworkDispatcher {
                     try {
                         HookRegistry.get().hook(method, new XC_MethodHook() {
                             @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
+                            public void beforeHookedMethod(MethodHookParam param) {
                                 if (dispatcherInstance == null
                                         || methodPriority(method) > methodPriority(dispatcherMethod)) {
                                     cacheDispatcher(param.thisObject, method, "网络发包器已缓存");

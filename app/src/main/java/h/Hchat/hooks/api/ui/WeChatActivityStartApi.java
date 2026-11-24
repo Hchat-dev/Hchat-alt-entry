@@ -85,7 +85,7 @@ public final class WeChatActivityStartApi {
             if (!isStartMethod(method)) continue;
             HookRegistry.get().hook(method, new XC_MethodHook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                public void beforeHookedMethod(MethodHookParam param) {
                     Intent intent = findIntent(param.args);
                     if (intent != null) dispatch(intent, param.thisObject, method);
                 }

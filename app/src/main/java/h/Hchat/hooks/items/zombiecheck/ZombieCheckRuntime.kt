@@ -238,7 +238,7 @@ class ZombieCheckRuntime(
         return ZombieCheckActionResult(true, "已开始批量删除 ${targets.size} 位好友")
     }
 
-    internal fun onProbeCallback(scene: Any, errCode: Int, errMessage: String, response: JSONObject?) {
+    internal fun onProbeCallback(scene: Any?, errCode: Int, errMessage: String, response: JSONObject?) {
         val probe = synchronized(lock) {
             val current = activeProbe
             if (current == null || current.scene !== scene) return

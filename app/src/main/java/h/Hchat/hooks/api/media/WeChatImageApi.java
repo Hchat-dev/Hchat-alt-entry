@@ -335,7 +335,7 @@ public final class WeChatImageApi {
         try {
             XC_MethodHook captureConstructedManager = new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     rememberMarsCdnManager(managerClass, param != null ? param.thisObject : null);
                 }
             };
@@ -350,7 +350,7 @@ public final class WeChatImageApi {
                     "startC2CDownload",
                     new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        public void beforeHookedMethod(MethodHookParam param) {
                             rememberMarsCdnManager(
                                     managerClass,
                                     param != null ? param.thisObject : null);

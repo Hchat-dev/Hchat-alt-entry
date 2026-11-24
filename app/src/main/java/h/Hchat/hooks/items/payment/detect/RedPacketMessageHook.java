@@ -75,7 +75,7 @@ public class RedPacketMessageHook {
 
                 HookRegistry.get().hook(method, new XC_MethodHook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         if (param.args == null) return;
                         for (int index : addMsgArgIndexes) {
                             if (index >= 0 && index < param.args.length && param.args[index] != null) {

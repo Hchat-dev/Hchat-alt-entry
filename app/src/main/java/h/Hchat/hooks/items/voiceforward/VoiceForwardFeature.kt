@@ -389,15 +389,16 @@ private class VoiceForwardHooker(
         }
     }
 
-    private fun removeVoiceFromFavoriteAdapter(adapter: Any) {
+    private fun removeVoiceFromFavoriteAdapter(adapter: Any?) {
         if (!favoriteClickForwardEnabled()) return
         val adapterActivity = favoriteSelectorActivity(adapter)
         val currentActivity = WeChatApis.currentActivity()?.currentActivity()
         val selectorActivity = adapterActivity ?: currentActivity
         val currentName = selectorActivity?.javaClass?.name
         if (adapter !in favoriteSelectorAdapters && currentName !in FAVORITE_SELECTOR_UI_NAMES) return
-        favoriteSelectorAdapters.add(adapter)
-        val filterField = KavaReflector.findFieldRecursive(adapter.javaClass, "f") ?: return
+        val adapterNonNull = adapter ?: return
+        favoriteSelectorAdapters.add(adapterNonNull)
+        val filterField = KavaReflector.findFieldRecursive(adapterNonNull.javaClass, "f") ?: return
         val filter = KavaReflector.readField(filterField, adapter)
         removeFavoriteVoiceType(filter)
         registerFavoriteSelectorFilter(adapter)
@@ -497,8 +498,8 @@ private class VoiceForwardHooker(
         return null
     }
 
-    private fun favoriteSelectorActivity(adapter: Any): Activity? {
-        var current: Class<*>? = adapter.javaClass
+    private fun favoriteSelectorActivity(adapter: Any?): Activity? {
+        var current: Class<*>? = adapter?.javaClass
         while (current != null && current != Any::class.java) {
             for (field in KavaReflector.declaredFields(current)) {
                 val value = KavaReflector.readField(field, adapter)

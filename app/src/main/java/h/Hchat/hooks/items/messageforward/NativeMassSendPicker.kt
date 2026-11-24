@@ -131,12 +131,12 @@ internal class NativeMassSendPicker(
         main.post { callback(selected) }
     }
 
-    private fun findActivity(listener: Any): Activity? {
+    private fun findActivity(listener: Any?): Activity? {
         val selector = findFieldValue(listener, SELECT_UI_CLASS_NAME, context.hostClassLoader())
         return selector as? Activity
     }
 
-    private fun readSelectedUsers(listener: Any): List<String> {
+    private fun readSelectedUsers(listener: Any?): List<String> {
         val selector = findFieldValue(listener, SELECT_UI_CLASS_NAME, context.hostClassLoader())
             ?: return emptyList()
         val list = readFieldNamed(selector, SELECTED_FIELD)
@@ -151,13 +151,13 @@ internal class NativeMassSendPicker(
     }
 
     /** 按类名找字段：不依赖监听器里那个混淆字段叫什么。 */
-    private fun findFieldValue(target: Any, className: String, loader: ClassLoader?): Any? {
+    private fun findFieldValue(target: Any?, className: String, loader: ClassLoader?): Any? {
         val wanted = runCatching { Class.forName(className, false, loader) }.getOrNull() ?: return null
         return findFieldValueByType(target, wanted)
     }
 
-    private fun findFieldValueByType(target: Any, wanted: Class<*>): Any? {
-        var clazz: Class<*>? = target::class.java
+    private fun findFieldValueByType(target: Any?, wanted: Class<*>): Any? {
+        var clazz: Class<*>? = target?.javaClass
         while (clazz != null && clazz != Any::class.java) {
             for (field in clazz.declaredFields) {
                 if (!wanted.isAssignableFrom(field.type)) continue

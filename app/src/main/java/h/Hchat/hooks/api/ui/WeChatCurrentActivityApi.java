@@ -39,7 +39,7 @@ public final class WeChatCurrentActivityApi {
             Method onDestroy = KavaReflector.findDeclaredMethod(Activity.class, "onDestroy");
             HookRegistry.get().hook(onResume, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     if (param.thisObject instanceof Activity) {
                         currentActivity = new WeakReference<>((Activity) param.thisObject);
                     }
@@ -47,7 +47,7 @@ public final class WeChatCurrentActivityApi {
             });
             XC_MethodHook clearHook = new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     Activity current = currentActivity();
                     if (current != null && current == param.thisObject) {
                         currentActivity = new WeakReference<>(null);

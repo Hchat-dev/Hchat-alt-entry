@@ -42,6 +42,21 @@ internal object ModuleChangelog {
     /** 新的在上。版本号按发布顺序倒序排列。 */
     val entries: List<ModuleChangelogEntry> = listOf(
         ModuleChangelogEntry(
+            "6.8.0.0",
+            listOf(
+                "Xposed API 82 迁移到 LibXposed API 102：入口改为 XposedModule，底层 hook 全部走 intercept 链",
+                "移除设置页调试分组：记录运行日志开关与日志查看器页面",
+                "保留崩溃证据与看门狗面包屑所依赖的日志存储内核"
+            )
+        ),
+        ModuleChangelogEntry(
+            "6.7.7.10",
+            listOf(
+                "修复指定骰子猜拳失效：表情发送入口改为多锚点定位，兼容微信 8.0.80 的 SendEmojiTask 链路",
+                "定位缓存版本 +1，升级后自动重新定位，无需清数据"
+            )
+        ),
+        ModuleChangelogEntry(
             "6.7.7.9",
             listOf(
                 "修复更新日志弹窗无法关闭：补关闭按钮并接管返回键",

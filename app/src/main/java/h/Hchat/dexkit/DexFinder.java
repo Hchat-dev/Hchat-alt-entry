@@ -43,7 +43,7 @@ public class DexFinder {
     private static final String CACHE_COMPLETE = "cache.complete";
     private static final String CACHE_KEY = "cache.key";
     private static final String CACHE_SNAPSHOT_VERSION_KEY = "cache.snapshot.version";
-    private static final String CACHE_SNAPSHOT_VERSION = "3";
+    private static final String CACHE_SNAPSHOT_VERSION = "4";
     private static final String SEND_TEXT_LOCATOR_VERSION_KEY = "send.text.locator.version";
     private static final String SEND_TEXT_LOCATOR_VERSION = "1";
     private static final String CACHE_SEND_TEXT_LOCATOR_RESOLVED = "locator.send.text.resolved";
@@ -52,6 +52,22 @@ public class DexFinder {
     private static final String LOCATOR_WISH_COMPLETE = "locator.wish.complete";
     private static final String LOCATOR_PACKET_COMPLETE = "locator.packet.complete";
     private static final String LOCATOR_ECS_COMPLETE = "locator.ecs.complete";
+
+    /**
+     * 表情发送入口的多版本定位锚点，按"新→旧"依次尝试。
+     *
+     * 8.0.80 起真正的发送入口是 EmojiMgrImpl.Z(...)；老代码用的 b0.Vj 只在
+     * 「SendEmojiTask 失败回退」分支里才被调用，用它做锚点会直接定位失败，
+     * 表现就是"指定骰子/猜拳点了没反应"。每个元素都是必须同时出现的字符串组。
+     */
+    private static final String[][] EMOJI_SEND_ANCHORS = {
+            // 8.0.80+：EmojiMgrImpl.Z 的日志
+            {"uploadEmoji: use SendEmojiTask, user %s, resend %b, quote %b"},
+            // 8.0.78 及更早：EmojiMgrImpl.W 的日志
+            {"sendEmoji: context is null", "sendEmoji: use SendEmojiTask, user %s"},
+            // 兜底：UploadEmoji 场景日志（老版本 b0.Vj/Bj）
+            {"NetSceneUploadEmoji: msgId = %s, md5 %s, len %s"}
+    };
     private static final String LOCATOR_MSG_DESC_COMPLETE = "locator.msg.desc.complete";
     private static final String LOCATOR_PROTOBUF_COMPLETE = "locator.protobuf.complete";
     private static final String RED_PACKET_UNION_LOCATOR_VERSION_KEY = "redpacket.union.locator.version";
@@ -1814,16 +1830,21 @@ public class DexFinder {
         if (ensureSnapshotLoaded()) return;
         try {
             if (emojiSendMethod == null) {
-                List<MethodData> methods = dexKit.findMethod(
-                        mkMethodUsingStrings("NetSceneUploadEmoji: msgId"));
-                for (MethodData methodData : methods) {
-                    try {
-                        Method method = methodData.getMethodInstance(classLoader);
-                        if (!isEmojiSendMethod(method)) continue;
-                        KavaReflector.accessible(method);
-                        emojiSendMethod = method;
-                        break;
-                    } catch (Throwable ignored) {}
+                // 8.0.80 起表情发送挪到了 EmojiMgrImpl.Z(talker, EmojiInfo, SendInfo, quote, scene)：
+                // 老的 b0.Vj 只在「SendEmojiTask 失败回退」时才调用，用旧锚点会定位失败，
+                // 于是指定骰子/猜拳在正式包里静默失效。这里改成多锚点依次尝试。
+                for (String[] anchor : EMOJI_SEND_ANCHORS) {
+                    if (emojiSendMethod != null) break;
+                    List<MethodData> methods = dexKit.findMethod(mkMethodUsingStrings(anchor));
+                    for (MethodData methodData : methods) {
+                        try {
+                            Method method = methodData.getMethodInstance(classLoader);
+                            if (!isEmojiSendMethod(method)) continue;
+                            KavaReflector.accessible(method);
+                            emojiSendMethod = method;
+                            break;
+                        } catch (Throwable ignored) {}
+                    }
                 }
             }
 
@@ -4310,8 +4331,11 @@ public class DexFinder {
         if (method == null || method.getReturnType() != void.class) return false;
         Class<?>[] params = method.getParameterTypes();
         if (params.length < 4) return false;
-        return params[0] == String.class
-                && isEmojiInfoClass(params[1]);
+        if (params[0] != String.class || !isEmojiInfoClass(params[1])) return false;
+        // 8.0.80 的新入口是 Z(String, EmojiInfo, SendInfo, quote, scene)，第 3 个参数已经不是
+        // SendInfo 时才会走 6 参老形态；这里只要求"第一个是会话、第二个是 EmojiInfo"，
+        // 避免把参数数量写死导致换版后再次定位失败。
+        return true;
     }
 
     private boolean isEmojiManagerSendMethod(Method method) {

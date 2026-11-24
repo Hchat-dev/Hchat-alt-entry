@@ -465,7 +465,7 @@ internal object ConversationGroupHomeProjection {
         true
     }.getOrElse { HLog.e("$TAG 安装首页投影失败", it); false }
 
-    private fun captureRefresh(installation: Installation, owner: Any, refresh: Refresh): Boolean = synchronized(lifecycleLock) {
+    private fun captureRefresh(installation: Installation, owner: Any?, refresh: Refresh): Boolean = synchronized(lifecycleLock) {
         if (!isActive(installation)) return false
         refreshers[owner] = refresh
         true

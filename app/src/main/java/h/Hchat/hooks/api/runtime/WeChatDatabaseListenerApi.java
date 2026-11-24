@@ -269,7 +269,7 @@ public final class WeChatDatabaseListenerApi {
             try {
                 HookRegistry.get().hook(method, new XC_MethodHook(de.robv.android.xposed.callbacks.XCallback.PRIORITY_LOWEST) {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         if (query) {
                             if (enterQuery()) transformQuery(param.args);
                         } else {
@@ -279,7 +279,7 @@ public final class WeChatDatabaseListenerApi {
                     }
 
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    public void afterHookedMethod(MethodHookParam param) {
                         if (query) {
                             leaveQuery();
                         } else if (leaveMutation()) {

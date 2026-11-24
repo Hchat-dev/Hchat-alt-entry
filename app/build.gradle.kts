@@ -85,6 +85,8 @@ android {
             useLegacyPackaging = true
         }
         resources {
+            // LibXposed 的入口声明与模块元数据必须原样进包（proguard 会改写 java_init.list 内容）
+            merges += "META-INF/xposed/*"
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "DebugProbesKt.bin"
             excludes += "META-INF/*.version"
@@ -114,7 +116,7 @@ kotlin {
 }
 
 dependencies {
-    compileOnly("de.robv.android.xposed:api:82")
+    compileOnly("io.github.libxposed:api:102.0.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.17")
     implementation("io.github.billywei01:fastkv:3.0.1")

@@ -167,7 +167,7 @@ internal object ConversationTabsRuntime {
         }
     }
 
-    private fun ensureHost(owner: Any, root: View) {
+    private fun ensureHost(owner: Any?, root: View) {
         runCatching {
             val previous = hosts[owner]?.get()
             if (previous != null && previous.root === root &&

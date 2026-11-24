@@ -83,7 +83,7 @@ public class RedPacketDatabaseHook {
 
                 HookRegistry.get().hook(method, new XC_MethodHook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         ContentValues values = findContentValuesArg(param.args);
                         if (values == null) return;
                         handleDatabaseInsert(findTableNameArg(param.args), values);

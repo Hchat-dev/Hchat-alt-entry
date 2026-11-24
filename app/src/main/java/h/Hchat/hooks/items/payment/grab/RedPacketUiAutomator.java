@@ -114,7 +114,7 @@ public class RedPacketUiAutomator {
         if (clazz == null) return;
         if (hookDeclaredAfter(clazz, "initView", null, new XC_MethodHook() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
+            public void afterHookedMethod(MethodHookParam param) {
                 handleReceivePage(param.thisObject, "initView", true);
             }
         })) {
@@ -123,14 +123,14 @@ public class RedPacketUiAutomator {
 
         hookDeclaredAfter(clazz, "onCreate", new Class<?>[]{Bundle.class}, new XC_MethodHook() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
+            public void afterHookedMethod(MethodHookParam param) {
                 handleReceivePage(param.thisObject, "onCreate", false);
             }
         });
 
         hookDeclaredAfter(clazz, "onResume", null, new XC_MethodHook() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
+            public void afterHookedMethod(MethodHookParam param) {
                 handleReceivePage(param.thisObject, "onResume", true);
             }
         });
@@ -141,7 +141,7 @@ public class RedPacketUiAutomator {
                 if (method.getParameterTypes().length != 4) continue;
                 HookRegistry.get().hook(method, new XC_MethodHook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    public void afterHookedMethod(MethodHookParam param) {
                         handleReceivePage(param.thisObject, "onSceneEnd", true);
                     }
                 });
@@ -155,7 +155,7 @@ public class RedPacketUiAutomator {
         try {
             hookDeclaredAfter(clazz, "onDestroy", null, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     if (param.thisObject instanceof Activity) {
                         clickedActivities.remove((Activity) param.thisObject);
                     }
@@ -196,7 +196,7 @@ public class RedPacketUiAutomator {
         if (clazz == null) return;
         if (hookDeclaredAfter(clazz, "onCreate", new Class<?>[]{Bundle.class}, new XC_MethodHook() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
+            public void afterHookedMethod(MethodHookParam param) {
                 if (param.thisObject instanceof Activity) {
                     scheduleDetailSuccessCheck((Activity) param.thisObject);
                 }
@@ -206,7 +206,7 @@ public class RedPacketUiAutomator {
         }
         if (hookDeclaredAfter(clazz, "onResume", null, new XC_MethodHook() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
+            public void afterHookedMethod(MethodHookParam param) {
                 if (param.thisObject instanceof Activity) {
                     scheduleDetailSuccessCheck((Activity) param.thisObject);
                 }

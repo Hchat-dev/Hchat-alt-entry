@@ -78,7 +78,7 @@ object ModuleResourceMenuFallback {
         }
     }
 
-    private fun markSelectionMenu(menuBuilder: Any) {
+    private fun markSelectionMenu(menuBuilder: Any?) {
         synchronized(selectionMenus) { selectionMenus[menuBuilder] = true }
     }
 
@@ -143,25 +143,25 @@ object ModuleResourceMenuFallback {
         }
     }
 
-    private fun isTermuxSelectionMenu(menuBuilder: Any): Boolean =
+    private fun isTermuxSelectionMenu(menuBuilder: Any?): Boolean =
         fromCallStack() || fromMenuCallback(menuBuilder)
 
     private fun fromCallStack(): Boolean = runCatching {
         Throwable().stackTrace.any { it.className.startsWith("com.termux.view") }
     }.getOrDefault(false)
 
-    private fun fromMenuCallback(menuBuilder: Any): Boolean = runCatching {
+    private fun fromMenuCallback(menuBuilder: Any?): Boolean = runCatching {
         val actionMode = XposedHelpers.getObjectField(menuBuilder, "mCallback") ?: return false
         val callback = XposedHelpers.getObjectField(actionMode, "mCallback") ?: return false
         callback.javaClass.name.startsWith("com.termux.view")
     }.getOrDefault(false)
 
-    private fun resourcesOf(menuBuilder: Any): Resources? =
+    private fun resourcesOf(menuBuilder: Any?): Resources? =
         runCatching { XposedHelpers.getObjectField(menuBuilder, "mResources") as? Resources }
             .getOrNull()
             ?: runCatching { XposedHelpers.callMethod(menuBuilder, "getResources") as? Resources }
                 .getOrNull()
 
-    private fun contextOf(menuBuilder: Any): Context? =
+    private fun contextOf(menuBuilder: Any?): Context? =
         runCatching { XposedHelpers.callMethod(menuBuilder, "getContext") as? Context }.getOrNull()
 }

@@ -232,7 +232,7 @@ public final class WeChatChatPageApi {
             KavaReflector.accessible(method);
             HookRegistry.get().hook(method, new XC_MethodHook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                public void beforeHookedMethod(MethodHookParam param) {
                     String talker = firstStringArg(param.args);
                     if (TextUtils.isEmpty(talker)) return;
                     pendingTalker = talker;
@@ -253,7 +253,7 @@ public final class WeChatChatPageApi {
             KavaReflector.accessible(method);
             HookRegistry.get().hook(method, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     String talker = callStringMethod(param.thisObject, "getStringExtra", CHAT_USER);
                     if (TextUtils.isEmpty(talker)) talker = pendingTalker;
                     if (!TextUtils.isEmpty(talker)) {
@@ -275,7 +275,7 @@ public final class WeChatChatPageApi {
             KavaReflector.accessible(method);
             HookRegistry.get().hook(method, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     String old = currentTalker;
                     currentTalker = "";
                     pendingTalker = "";

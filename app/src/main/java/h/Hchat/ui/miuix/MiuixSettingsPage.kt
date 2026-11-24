@@ -1277,7 +1277,6 @@ object MiuixSettingsPage {
                                     onOpenScriptPluginAgent = { openDetail(DetailPage.ScriptPluginAgent()) },
                                     onOpenScriptPluginMarket = { openDetail(DetailPage.ScriptPluginMarket()) },
                                     onOpenScriptPluginManager = { openDetail(DetailPage.ScriptPluginManager()) },
-                                    onOpenLogViewer = { openDetail(DetailPage.LogViewer) },
                                     onConfigImported = { configVersion.value += 1 }
                                 )
                             } else if (targetPage is DetailPage.Search) {
@@ -1341,11 +1340,6 @@ object MiuixSettingsPage {
                                 )
                             } else if (targetPage is DetailPage.ScriptPluginManager) {
                                 ScriptPluginSettingsMiuixContent.ScriptPluginManagerPage(
-                                    context = activity,
-                                    onBack = { popDetail() }
-                                )
-                            } else if (targetPage is DetailPage.LogViewer) {
-                                HchatLogViewerPage(
                                     context = activity,
                                     onBack = { popDetail() }
                                 )
@@ -2984,15 +2978,12 @@ internal fun MainSettingsPage(
     onOpenScriptPluginAgent: () -> Unit,
     onOpenScriptPluginMarket: () -> Unit,
     onOpenScriptPluginManager: () -> Unit,
-    onOpenLogViewer: () -> Unit,
     onConfigImported: () -> Unit
 ) {
     val uiPrefs = remember(configVersion) { HchatStorage.preferences(context, UI_PREFS_NAME) }
     val glassSupported = remember { isLiquidGlassSupported() }
     var floatingNav by remember(configVersion) { mutableStateOf(uiPrefs.getBoolean(KEY_FLOATING_NAV, true)) }
     var glassNav by remember(configVersion) { mutableStateOf(glassSupported && uiPrefs.getBoolean(KEY_GLASS_NAV, true)) }
-    // 「记录运行日志」开关。日志页里也能改同一个开关，所以每次回到设置页对齐一次状态。
-    var logCapture by remember { mutableStateOf(h.Hchat.utils.HLog.isCaptureEnabled()) }
     val entertainmentListState = rememberLazyListState()
     val pluginListState = rememberLazyListState()
     val settingsListState = rememberLazyListState()
@@ -3009,13 +3000,6 @@ internal fun MainSettingsPage(
             it.category() == FeatureSettingsProvider.CATEGORY_ENHANCE &&
                 it.featureId() != ScriptPluginFeature.ID
         }
-    }
-    // 首帧耗时打点：进入设置页到第一次组合完成的耗时，写日志便于回归对比。
-    val settingsPageEnteredAt = remember { System.currentTimeMillis() }
-    LaunchedEffect(Unit) {
-        h.Hchat.utils.HLog.e(
-            "[Hchat:SettingsUI] 设置页首帧组装完成: ${System.currentTimeMillis() - settingsPageEnteredAt}ms"
-        )
     }
     val practicalGroups = remember(practicalProviders, enhanceProviders) {
         practicalFeatureGroups(practicalProviders, enhanceProviders)
@@ -3036,15 +3020,6 @@ internal fun MainSettingsPage(
     // 却会让每次切 tab 把整棵页面（四个 LazyColumn + 底栏）重组一遍，正好与 Pager
     // 弹簧动画抢同一帧的时间。
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { tabs.size })
-    // 用 settledPage 判断"停稳了"：currentPage 在翻页动画途中会反复变化，逐次回调
-    // 等于在动画期间制造一串重组。底栏高亮则改用 targetPage，点下去立刻跟手。
-    LaunchedEffect(pagerState.settledPage) {
-        val settled = tabs.getOrNull(pagerState.settledPage) ?: return@LaunchedEffect
-        if (settled == MainTab.SETTINGS) {
-            h.Hchat.utils.HLog.initCapture(context)
-            logCapture = h.Hchat.utils.HLog.isCaptureEnabled()
-        }
-    }
     val activeTab = tabs.getOrElse(pagerState.targetPage) { MainTab.PRACTICAL }
     PageScaffold(
         title = "Hchat",
@@ -3165,41 +3140,6 @@ internal fun MainSettingsPage(
                                 context = context,
                                 onImported = onConfigImported
                             )
-                        }
-                        item { SmallTitle(modifier = Modifier.padding(top = 10.dp), text = "调试") }
-                        item {
-                            SettingsCard {
-                                SwitchRow(
-                                    checked = logCapture,
-                                    title = "记录运行日志",
-                                    summary = "默认关闭。开启后模块运行日志会写入内存缓冲（最多 2000 条），重启微信后清空",
-                                    onCheckedChange = { value ->
-                                        logCapture = value
-                                        HchatStorage.preferences(
-                                            context,
-                                            h.Hchat.utils.HLog.PREFS_NAME
-                                        ).edit()
-                                            .putBoolean(h.Hchat.utils.HLog.KEY_CAPTURE_ENABLED, value)
-                                            .apply()
-                                        h.Hchat.utils.HLog.setCaptureEnabled(value)
-                                        Toast.makeText(
-                                            context,
-                                            if (value) "日志采集已开启" else "日志采集已关闭，之后不再记录新日志",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    }
-                                )
-                                InsetDivider()
-                                ActionRow(
-                                    title = "运行日志",
-                                    summary = if (logCapture) {
-                                        "已捕获 ${h.Hchat.utils.HLog.captureSize()} 条，点击查看"
-                                    } else {
-                                        "记录已关闭，点击查看历史缓冲"
-                                    },
-                                    onClick = onOpenLogViewer
-                                )
-                            }
                         }
                         item { SmallTitle(modifier = Modifier.padding(top = 10.dp), text = "群组") }
                         item { GroupLinksCard(context) }
@@ -3871,9 +3811,6 @@ internal sealed class DetailPage {
     data class ScriptPluginAgent(val parentFeature: Feature? = null) : DetailPage()
     data class ScriptPluginMarket(val parentFeature: Feature? = null) : DetailPage()
     data class ScriptPluginManager(val parentFeature: Feature? = null) : DetailPage()
-
-    /** 模块运行日志（内存缓冲，开关默认关闭）。 */
-    object LogViewer : DetailPage()
 }
 
 internal data class SettingsNavKey(val page: DetailPage?) : NavKey

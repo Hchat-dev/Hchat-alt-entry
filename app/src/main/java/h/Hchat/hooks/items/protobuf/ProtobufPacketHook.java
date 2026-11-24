@@ -66,7 +66,7 @@ public class ProtobufPacketHook {
                     if (!hookedDesc.add(desc)) continue;
                     HookRegistry.get().hook(method, new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        public void beforeHookedMethod(MethodHookParam param) {
                             handleDispatch(param);
                         }
                     });
@@ -323,7 +323,7 @@ public class ProtobufPacketHook {
         if (!hookedDesc.add(desc)) return 0;
         HookRegistry.get().hook(method, new XC_MethodHook() {
             @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
+            public void beforeHookedMethod(MethodHookParam param) {
                 if (param.args == null || param.args.length < 4) return;
                 Object scene = param.args[3];
                 if (!ProtobufPacketRuntime.isGenericScene(scene)) return;

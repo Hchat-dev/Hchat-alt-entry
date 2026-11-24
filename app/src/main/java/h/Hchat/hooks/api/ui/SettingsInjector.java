@@ -163,10 +163,12 @@ public class SettingsInjector {
 
         try {
             // Hook SettingsUI.initView()
-            HookRegistry.get().add(XposedHelpers.findAndHookMethod(dex.settingsUIClass, "initView",
+            Method initView = dex.settingsUIClass.getDeclaredMethod("initView");
+            initView.setAccessible(true);
+            HookRegistry.get().add(HookRegistry.get().hook(initView,
                     new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             Activity activity = (Activity) param.thisObject;
                             try {
                                 Constructor<?> ctor = KavaReflector.findConstructor(
@@ -200,7 +202,7 @@ public class SettingsInjector {
                 final Method finalTarget = targetTreeClick;
                 HookRegistry.get().hook(finalTarget, new XC_MethodHook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         try {
                             // WeKit: if (args.size < 2) return; val preference = args[1]
                             if (param.args.length < 2) return;
@@ -408,7 +410,7 @@ public class SettingsInjector {
             final Constructor<?> finalProxyConstructor = proxyConstructor;
             HookRegistry.get().hook(proxyConstructor, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     ProxyBuilder.setInvocationHandler(param.thisObject, handler);
                 }
             });
@@ -424,7 +426,7 @@ public class SettingsInjector {
                     HookRegistry.get().hook(m, new XC_MethodHook(
                             de.robv.android.xposed.callbacks.XCallback.PRIORITY_HIGHEST) {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             try {
                                 Object oldLocation = param.getResult();
                                 Class<?> parentClass = readSettingLocationClass(oldLocation, 0, groupSettingItemClass);
@@ -456,7 +458,7 @@ public class SettingsInjector {
             } else {
                 HookRegistry.get().hook(providerMethod, new XC_MethodHook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    public void afterHookedMethod(MethodHookParam param) {
                         try {
                             Map<?, ?> map = (Map<?, ?>) param.getResult();
                             if (map == null) return;
@@ -573,7 +575,7 @@ public class SettingsInjector {
 
         HookRegistry.get().hook(superImportMethod, new XC_MethodHook() {
             @Override
-            protected void afterHookedMethod(MethodHookParam param) {
+            public void afterHookedMethod(MethodHookParam param) {
                 try {
                     if (mainOnly
                             && dex.mainSettingsUIClass != null
@@ -603,7 +605,7 @@ public class SettingsInjector {
                 Context.class, "getString", int.class,
                 new XC_MethodHook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         if ((int) param.args[0] == HCHAT_SETTING_ITEM_NAME_RES_ID) {
                             param.setResult(PREFS_TITLE);
                         }
@@ -690,7 +692,7 @@ public class SettingsInjector {
                     android.os.Bundle.class,
                     new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        public void beforeHookedMethod(MethodHookParam param) {
                             try {
                                 Activity activity = (Activity) param.thisObject;
                                 Intent intent = activity.getIntent();
@@ -707,7 +709,7 @@ public class SettingsInjector {
                     Intent.class,
                     new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
+                        public void beforeHookedMethod(MethodHookParam param) {
                             try {
                                 Activity activity = (Activity) param.thisObject;
                                 Intent intent = (Intent) param.args[0];
@@ -749,7 +751,7 @@ public class SettingsInjector {
                     plusActionViewClass,
                     new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        public void afterHookedMethod(MethodHookParam param) {
                             try {
                                 markPlusView(resolvePlusActionRealView(param.thisObject));
                             } catch (Throwable e) {
@@ -834,7 +836,7 @@ public class SettingsInjector {
         try {
             HookRegistry.get().hook(dex.plusSubMenuAdapterMethod, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     try {
                         BaseAdapter adapter = param.getResult() instanceof BaseAdapter
                                 ? (BaseAdapter) param.getResult()
@@ -848,7 +850,7 @@ public class SettingsInjector {
 
             HookRegistry.get().hook(dex.plusSubMenuOnItemClickMethod, new XC_MethodHook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                public void beforeHookedMethod(MethodHookParam param) {
                     try {
                         if (param.args == null || param.args.length < 3) return;
                         int position = (int) param.args[2];
@@ -1207,7 +1209,7 @@ public class SettingsInjector {
             if (getViewMethod == null) return;
             HookRegistry.get().hook(getViewMethod, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     try {
                         if (param.args == null || param.args.length < 1) return;
                         Object result = param.getResult();
@@ -1286,7 +1288,7 @@ public class SettingsInjector {
             if (!methods.add(populateMethod)) continue;
             HookRegistry.get().hook(populateMethod, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     appendPlusMenuItemSafely(param.thisObject);
                 }
             });
@@ -1296,7 +1298,7 @@ public class SettingsInjector {
             if (!methods.add(showMethod)) continue;
             HookRegistry.get().hook(showMethod, new XC_MethodHook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                public void beforeHookedMethod(MethodHookParam param) {
                     appendPlusMenuItemSafely(param.thisObject);
                 }
             });

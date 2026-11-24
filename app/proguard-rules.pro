@@ -56,8 +56,12 @@
 -keep class me.yun.silk.** { *; }
 -keep class me.yun.silk.utils.** { *; }
 
-# Xposed
--keep class de.robv.android.xposed.** { *; }
+# Xposed（LibXposed API 102）
+-dontwarn io.github.libxposed.annotation.**
+-adaptresourcefilecontents META-INF/xposed/java_init.list
+-keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
+    public <init>();
+}
 -keep class h.Hchat.ModuleEntry { *; }
 -keep class h.Hchat.crash.NativeCrashBridge { *; }
 -keep class h.Hchat.crash.CrashExitInfoApi30 { *; }

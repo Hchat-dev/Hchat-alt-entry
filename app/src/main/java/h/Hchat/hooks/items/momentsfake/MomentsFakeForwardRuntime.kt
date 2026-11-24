@@ -826,7 +826,7 @@ internal class MomentsFakeForwardRuntime(
                             "protectedBits=$TIMELINE_SOURCE_TYPE"
                     )
                     if (effective == 0) {
-                        param.result = null
+                        param.setResult(null)
                     } else {
                         param.args[0] = effective
                     }
@@ -887,7 +887,7 @@ internal class MomentsFakeForwardRuntime(
                         return
                     }
                     // Never let a failed local mark fall through to WeChat's server-delete branch.
-                    param.result = null
+                    param.setResult(null)
                     val numericId = runCatching { java.lang.Long.parseUnsignedLong(id) }.getOrNull()
                     if (numericId != null && WeChatApis.snsApi()?.deleteCachedNativeSnsInfo(numericId) == true) {
                         removeFakeId(id)

@@ -197,7 +197,7 @@ private class MomentsBottomDetailRuntime(
                 HookRegistry.get().hook(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (MomentsBottomDetailFeature.isEnabled(context.hostContext())) {
-                            param.result = false
+                            param.setResult(false)
                         }
                     }
                 })

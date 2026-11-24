@@ -97,6 +97,8 @@ internal class FinderFeedDetailResolver private constructor(
         private const val FINDER_OBJECT_CLASS = "com.tencent.mm.protocal.protobuf.FinderObject"
         private const val FEED_OBJECT_FIELD_INDEX = 2
         private const val REF_OBJECT_LIST_FIELD_INDEX = 10
+        /** protobuf 响应里扫 FinderObject 用到的 custom 下标上限。 */
+        private const val CUSTOM_SCAN_MAX_INDEX = 12
         private const val DEFAULT_COMMENT_SCENE = 20
         private const val DETAIL_TIMEOUT_SECONDS = 20L
         private const val CACHE_TTL_MS = 10 * 60_000L
@@ -134,8 +136,22 @@ internal class FinderFeedDetailResolver private constructor(
         }
 
         private fun locateCallbackMethod(owner: Class<*>): Method? {
-            return KavaReflector.declaredMethods(owner)
-                .singleOrNull { isCallbackMethod(it, owner) }
+            val found = KavaReflector.declaredMethods(owner)
+                .filter { isCallbackMethod(it, owner) }
+                .distinctBy { it.toGenericString() }
+            val method = found.singleOrNull()
+                ?: found.minByOrNull { it.parameterTypes.size }
+            if (method == null) {
+                // 以前这里是静默 null，日志里只剩"多次安装失败"没有任何线索。
+                HLog.e(
+                    "$TAG 回调方法未命中: owner=${owner.name} 方法表=" +
+                        KavaReflector.declaredMethods(owner)
+                            .joinToString(";") { m ->
+                                "${m.name}(${m.parameterTypes.joinToString(",") { t -> t.simpleName }})${m.returnType.simpleName}"
+                            }
+                )
+            }
+            return method
         }
 
         private fun locateRequestConstructor(context: FeatureContext): Constructor<*>? {
@@ -152,14 +168,35 @@ internal class FinderFeedDetailResolver private constructor(
             }.onFailure {
                 HLog.e("$TAG DexKit定位视频号详情请求失败: ${it.message}", it)
             }.getOrDefault(emptyList())
-            if (candidates.size != 1) {
+            // 优先沿用旧版精确签名；新版参数被扩展成一个巨型数据类，
+            // 退化为"参数最少的业务构造器"（Kotlin 默认参数生成的合成构造器总会多出
+            // int mask + DefaultConstructorMarker，参数数一定比业务构造器多）。
+            val resolved = candidates.singleOrNull()
+                ?: candidates.filter(::isLegacyRequestConstructor).singleOrNull()
+                ?: candidates.minByOrNull { it.parameterTypes.size }
+            if (resolved == null) {
                 HLog.e("$TAG 视频号详情请求候选数量异常: count=${candidates.size}")
+            } else if (candidates.size > 1) {
+                HLog.e("$TAG 视频号详情请求候选 ${candidates.size} 个，选用参数最少的 " +
+                    "(${resolved.parameterTypes.size} 个参数)")
             }
-            return candidates.singleOrNull()
+            return resolved
         }
 
+        /**
+         * 8.0.80 起这个请求体的构造器从 (long,String,int,int) 扩到了三十多个参数
+         * （微信把详情参数全部塞进了一个 Kotlin 数据类）。精确签名不可能再稳定，
+         * 这里只保留最稳的两个特征：首参 long、次参 String。
+         */
         private fun isRequestConstructor(constructor: Constructor<*>): Boolean {
-            return constructor.parameterTypes.contentEquals(
+            val types = constructor.parameterTypes
+            return types.size >= 2 &&
+                types[0] == java.lang.Long.TYPE &&
+                types[1] == String::class.java
+        }
+
+        private fun isLegacyRequestConstructor(constructor: Constructor<*>): Boolean =
+            constructor.parameterTypes.contentEquals(
                 arrayOf(
                     java.lang.Long.TYPE,
                     String::class.java,
@@ -167,19 +204,31 @@ internal class FinderFeedDetailResolver private constructor(
                     java.lang.Integer.TYPE
                 )
             )
-        }
 
+        /**
+         * 回调签名（离线反编译验证，8.0.80 = classes2.dex th2/g4）：
+         * - 旧版 6 参：(int, int, int, String, Object, byte[])
+         * - 8.0.80 5 参：A(int errType, int errCode, String errMsg, protobuf.f resp, n1 ctx)V
+         *   （方法内日志 "[onCgiBack] errType=.. errCode=.." 与寄存器顺序一一对应）
+         * 共同特征：void 返回、首两参 int、第三个原始参数是 String。
+         */
         private fun isCallbackMethod(method: Method, owner: Class<*>): Boolean {
             val types = method.parameterTypes
-            return method.declaringClass == owner &&
-                method.returnType == Void.TYPE &&
-                types.size == 6 &&
-                types[0] == java.lang.Integer.TYPE &&
-                types[1] == java.lang.Integer.TYPE &&
-                types[2] == java.lang.Integer.TYPE &&
-                types[3] == String::class.java &&
-                !types[4].isPrimitive &&
-                types[5] == ByteArray::class.java
+            if (method.declaringClass != owner || method.returnType != Void.TYPE) return false
+            if (types.size < 3) return false
+            if (types[0] != java.lang.Integer.TYPE || types[1] != java.lang.Integer.TYPE) return false
+            return when {
+                types.size == 6 ->
+                    types[2] == java.lang.Integer.TYPE &&
+                        types[3] == String::class.java &&
+                        !types[4].isPrimitive &&
+                        types[5] == ByteArray::class.java
+                types.size == 5 ->
+                    types[2] == String::class.java &&
+                        !types[3].isPrimitive &&
+                        !types[4].isPrimitive
+                else -> false
+            }
         }
 
         private fun installCallbackHook(method: Method): Boolean {
@@ -189,13 +238,17 @@ internal class FinderFeedDetailResolver private constructor(
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val scene = param.thisObject ?: return
                         val request = pending.remove(scene) ?: return
-                        val errType = (param.args.getOrNull(1) as? Number)?.toInt() ?: -1
-                        val errCode = (param.args.getOrNull(2) as? Number)?.toInt() ?: -1
+                        // 参数含义随版本不同：
+                        // 旧 6 参 (scene, errType, errCode, errMsg, resp, raw)
+                        // 8.0.80 5 参 (errType, errCode, errMsg, resp, ctx)
+                        val legacy = (param.method as? Method)?.parameterTypes?.size == 6
+                        val errType = (param.args.getOrNull(if (legacy) 1 else 0) as? Number)?.toInt() ?: -1
+                        val errCode = (param.args.getOrNull(if (legacy) 2 else 1) as? Number)?.toInt() ?: -1
                         if (errType == 0 && errCode == 0) {
                             request.finderObject = extractFinderObject(
                                 scene,
-                                param.args.getOrNull(4),
-                                param.args.getOrNull(5) as? ByteArray,
+                                param.args.getOrNull(if (legacy) 4 else 3),
+                                param.args.getOrNull(if (legacy) 5 else 4) as? ByteArray,
                                 request.feedId
                             )
                             if (request.finderObject == null) {
@@ -276,14 +329,28 @@ internal class FinderFeedDetailResolver private constructor(
             if (depth < 0 || !visited.add(response)) return null
             if (isTargetFinderObject(response, feedId, allowUnknownId = false)) return response
 
-            val feedObject = sequenceOf(
-                KavaReflector.invokeMethod(response, "getCustom", FEED_OBJECT_FIELD_INDEX),
-                KavaReflector.invokeMethod(response, "getOrDefault", FEED_OBJECT_FIELD_INDEX),
-                KavaReflector.invokeMethod(response, "getFeedObject"),
-                KavaReflector.readField(response, "feedObject")
-            ).firstOrNull { value ->
-                isTargetFinderObject(value, feedId, allowUnknownId = true)
-            }
+            // 8.0.80 响应类（gd5/b81）里 FinderObject 所在的 custom 下标与旧响应类不同，
+            // 反编译里按寄存器看不出常量，直接扫 0..12：protobuf 的 getCustom 越界只会
+            // 返回 null，代价是一次反射调用，可忽略。
+            val customCandidates = (0..CUSTOM_SCAN_MAX_INDEX).asSequence()
+                .map { idx -> KavaReflector.invokeMethod(response, "getCustom", idx) }
+                .plus(
+                    sequenceOf(
+                        KavaReflector.invokeMethod(response, "getOrDefault", FEED_OBJECT_FIELD_INDEX),
+                        KavaReflector.invokeMethod(response, "getFeedObject"),
+                        KavaReflector.readField(response, "feedObject")
+                    )
+                )
+                .filterNotNull()
+                .filter { isFinderObject(it) }
+                .toList()
+            // 先找 id 精确匹配，找不到才接受第一个未知 id 的 FinderObject，
+            // 避免扫下标时先撞到别的 feed 对象拿错数据。
+            val feedObject = customCandidates
+                .firstOrNull { isTargetFinderObject(it, feedId, allowUnknownId = false) }
+                ?: customCandidates.firstOrNull {
+                    isTargetFinderObject(it, feedId, allowUnknownId = true)
+                }
             if (feedObject != null) return feedObject
 
             val referenceObjects = sequenceOf(

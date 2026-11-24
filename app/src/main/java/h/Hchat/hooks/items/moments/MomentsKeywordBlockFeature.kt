@@ -422,7 +422,7 @@ private class MomentsKeywordBlockRuntime(
         return runCatching {
             HookRegistry.get().hook(KavaReflector.accessible(method) ?: method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (activeKeywords().isNotEmpty()) param.result = false
+                    if (activeKeywords().isNotEmpty()) param.setResult(false)
                 }
             })
             profileSwitchHookInstalled = true

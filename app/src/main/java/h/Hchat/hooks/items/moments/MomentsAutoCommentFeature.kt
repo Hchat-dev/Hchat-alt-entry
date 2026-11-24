@@ -77,21 +77,47 @@ private class MomentsAutoCommentRuntime(
                 cancelPendingComments()
             }
             enabledState = enabled
+            // 开关变化后重算订阅：关闭时立即退订朋友圈动态与数据库变更，
+            // 避免"功能关着仍在接收每条朋友圈回调"。
+            refreshSubscriptions()
         }
     }
     private var postSubscription: WeChatSnsPostObserver.Subscription? = null
     private var deleteSubscription: WeChatDatabaseListenerApi.Subscription? = null
 
     fun start() {
+        // 先注册偏好监听是必须的：只有它能在用户后续打开开关时把订阅补上。
+        prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
+        refreshSubscriptions()
+    }
+
+    /**
+     * 按当前开关状态决定是否持有朋友圈/数据库订阅。
+     *
+     * 原实现在 [start] 里无条件 `observePosts` + `subscribe`，并读取历史记录，
+     * 即使功能默认关闭也会让微信每次插入 SnsInfo 都回调进来。本模块的
+     * `DEFAULT_ENABLE` 是关闭，所以这部分开销在所有默认用户身上都是纯浪费。
+     */
+    private fun refreshSubscriptions() {
+        if (!enabledState) {
+            postSubscription?.unsubscribe()
+            postSubscription = null
+            deleteSubscription?.unsubscribe()
+            deleteSubscription = null
+            return
+        }
         loadSuccessfulCommentRecords()
-        if (enabledState && prefs.getLong(MomentsAutoCommentSettings.KEY_ENABLED_AT_SECONDS, 0L) <= 0L) {
+        if (prefs.getLong(MomentsAutoCommentSettings.KEY_ENABLED_AT_SECONDS, 0L) <= 0L) {
             prefs.edit()
                 .putLong(MomentsAutoCommentSettings.KEY_ENABLED_AT_SECONDS, nowSeconds())
                 .apply()
         }
-        prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
-        postSubscription = snsApi?.observePosts(::onPostStored)
-        deleteSubscription = WeChatApis.databaseChanges()?.subscribe(::onDatabaseChange)
+        if (postSubscription == null) {
+            postSubscription = snsApi?.observePosts(::onPostStored)
+        }
+        if (deleteSubscription == null) {
+            deleteSubscription = WeChatApis.databaseChanges()?.subscribe(::onDatabaseChange)
+        }
     }
 
     fun destroy() {

@@ -296,8 +296,11 @@ internal object SnsContextMenuDispatcher {
     }
 
     private fun createTimeText(nativeInfo: Any?): String? {
+        // 8.0.80 的 SnsInfo 自身不声明这些字段，它们挂在父类（llm.ua）上，
+        // KavaReflector.readField 会沿继承链找；再兜一层 getter 以防换成别的包装对象。
         val raw = (KavaReflector.readField(nativeInfo, "field_createTime") as? Number)?.toLong()
             ?: (KavaReflector.readField(nativeInfo, "createTime") as? Number)?.toLong()
+            ?: (KavaReflector.invokeMethod(nativeInfo, "getCreateTime") as? Number)?.toLong()
             ?: return null
         if (raw <= 0L) return null
         val millis = if (raw < 10_000_000_000L) raw * 1_000L else raw
@@ -335,7 +338,9 @@ internal object SnsContextMenuDispatcher {
         var nativeInfo = currentResolver.resolveNativeSnsInfo(param.thisObject, param.args)
         val nativeId = nativeInfo?.let(::snsIdFromNative)
         val snapshotId = normalizeSnsId(snapshot.id)
-        if (nativeInfo != null && snapshotId != null && nativeId != snapshotId) {
+        // nativeId 读不到时不能当成"对不上"：那样每次都会把 nativeInfo 丢掉，
+        // 让依赖原生对象的功能（转发原图、视频定位）全部降级。
+        if (nativeInfo != null && snapshotId != null && nativeId != null && nativeId != snapshotId) {
             nativeInfo = null
         }
         val stableId = snapshotId ?: nativeId
@@ -353,6 +358,8 @@ internal object SnsContextMenuDispatcher {
     private fun snsIdFromNative(nativeInfo: Any): String? {
         val raw = KavaReflector.readField(nativeInfo, "field_snsId")
             ?: KavaReflector.readField(nativeInfo, "snsId")
+            ?: KavaReflector.invokeMethod(nativeInfo, "getSnsId")
+            ?: KavaReflector.invokeMethod(nativeInfo, "getLocalid")
         return normalizeSnsId(raw?.toString())
     }
 

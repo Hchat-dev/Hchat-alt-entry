@@ -42,7 +42,7 @@ internal object ModuleChangelog {
     /** 新的在上。版本号按发布顺序倒序排列。 */
     val entries: List<ModuleChangelogEntry> = listOf(
         ModuleChangelogEntry(
-            "6.8.0.0",
+            "6.7.7.11",
             listOf(
                 "Xposed API 82 迁移到 LibXposed API 102：入口改为 XposedModule，底层 hook 全部走 intercept 链",
                 "移除设置页调试分组：记录运行日志开关与日志查看器页面",

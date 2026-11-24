@@ -61,7 +61,7 @@ private class QuickMarkReadDragController(
                 val activity = param.thisObject as? Activity ?: return
                 val event = param.args?.getOrNull(0) as? MotionEvent ?: return
                 if (handleTouch(activity, event)) {
-                    param.result = true
+                    param.setResult(true)
                 }
             }
         }
@@ -83,26 +83,27 @@ private class QuickMarkReadDragController(
     }
 
     private fun collectDispatchMethods(): Set<Method> {
-        val methods = LinkedHashSet<Method>()
+        // 只挂继承链上最派生的 dispatchTouchEvent。LauncherUI 及其父类若各自声明了
+        // 该方法且存在 super 调用链，一个事件会先穿过子类再穿到父类——
+        // 每层都挂 hook 等于一次触摸进 N 个回调。
         val launcherClass = KavaReflector.loadClass(LAUNCHER_UI, classLoader)
         var current: Class<*>? = launcherClass
         while (current != null && Activity::class.java.isAssignableFrom(current)) {
-            KavaReflector.findDeclaredMethod(
+            val found = KavaReflector.findDeclaredMethod(
                 current,
                 DISPATCH_TOUCH_EVENT,
                 MotionEvent::class.java
-            )?.let { methods.add(it) }
+            )
+            if (found != null) return setOf(found)
             if (current == Activity::class.java) break
             current = current.superclass
         }
-        if (methods.isEmpty()) {
-            KavaReflector.findDeclaredMethod(
-                Activity::class.java,
-                DISPATCH_TOUCH_EVENT,
-                MotionEvent::class.java
-            )?.let { methods.add(it) }
-        }
-        return methods
+        val fallback = KavaReflector.findDeclaredMethod(
+            Activity::class.java,
+            DISPATCH_TOUCH_EVENT,
+            MotionEvent::class.java
+        )
+        return if (fallback != null) setOf(fallback) else emptySet()
     }
 
     private fun handleTouch(activity: Activity, event: MotionEvent): Boolean {
@@ -113,6 +114,16 @@ private class QuickMarkReadDragController(
         if (!QuickMarkReadRuntime.isDragEnabled(activity)) {
             clearGesture(resetActive = true)
             return false
+        }
+        // 手势目标只在底部导航/悬浮栏的「微信」标签附近，触摸区域预判放在
+        // 任何树遍历之前：屏幕上 2/3 区域的按下（聊天列表滚动、点消息等）
+        // 直接短路，避免每次 DOWN 都全树 DFS。
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            val screenH = activity.resources.displayMetrics.heightPixels
+            if (event.rawY < screenH * BOTTOM_GESTURE_MIN_RATIO) {
+                clearGesture(resetActive = false)
+                return false
+            }
         }
         return when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> startPendingSession(activity, event)
@@ -472,6 +483,8 @@ private class QuickMarkReadDragController(
         private const val DISPATCH_TOUCH_EVENT = "dispatchTouchEvent"
         private const val HCHAT_SETTINGS_PAGE_TAG = "Hchat:MiuixSettingsPage"
         private const val HOME_TAB_LABEL = "微信"
+        // 手势起点只在底部导航附近；屏幕底部 34% 以下的 DOWN 才值得做树遍历。
+        private const val BOTTOM_GESTURE_MIN_RATIO = 0.66f
         private val UNREAD_TEXT = Regex("""\d+\+?|…|\.{2,3}""")
         private val BOTTOM_TAB_LABELS = setOf("微信", "通讯录", "发现", "我")
 

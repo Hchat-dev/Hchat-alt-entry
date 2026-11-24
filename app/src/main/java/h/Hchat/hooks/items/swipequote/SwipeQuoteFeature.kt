@@ -419,7 +419,7 @@ private class SwipeQuoteAdapter(
                         }
                         activity.setResult(android.app.Activity.RESULT_OK, result)
                         activity.finish()
-                        param.result = null
+                        param.setResult(null)
                     }
                 })
             }.onFailure {
@@ -477,15 +477,28 @@ private class SwipeQuoteAdapter(
                     val view = param.thisObject as? View ?: return
                     val event = param.args?.getOrNull(0) as? MotionEvent ?: return
                     if (!isEnabled()) return
+                    val fromIntercept = methodName == "onInterceptTouchEvent"
+                    val action = event.actionMasked
+
+                    // 快速路径：非 ACTION_DOWN 且当前列表没有进行中的手势，直接放弃。
+                    // 这是全局 RecyclerView 的 hook，通讯录、朋友圈、表情面板等都没有
+                    // 引用目标，原实现仍会对每个 MOVE 遍历整棵可见子树（每秒数万次
+                    // 加锁查表），是"所有列表滚动都发涩"的主要来源。
+                    if (action != MotionEvent.ACTION_DOWN) {
+                        val state = synchronized(recyclerStates) { recyclerStates[view] }
+                        if (state == null || !state.tracking) return
+                        // DOWN 时已经记下命中目标，后续 MOVE/UP 无需重新做命中测试。
+                        if (state.hit != null) {
+                            if (handleTouch(view, event, null, recyclerStates, fromIntercept)) {
+                                param.setResult(true)
+                            }
+                            return
+                        }
+                    }
+
                     val hit = findRecyclerTarget(view, event.x, event.y)
-                    if (handleTouch(
-                            view,
-                            event,
-                            hit,
-                            recyclerStates,
-                            methodName == "onInterceptTouchEvent"
-                        )) {
-                        param.result = true
+                    if (handleTouch(view, event, hit, recyclerStates, fromIntercept)) {
+                        param.setResult(true)
                     }
                 }
             })

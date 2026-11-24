@@ -384,7 +384,7 @@ object ScriptMenuDispatcher {
         val helper = param.thisObject
         val itemId = readPlusMenuItemId(helper, position)
         val entry = plusEntries.values.firstOrNull { it.itemId == itemId } ?: return
-        param.result = null
+        param.setResult(null)
         val now = System.currentTimeMillis()
         if (lastPlusClickId == itemId && now - lastPlusClickAt < CLICK_DEDUP_MS) return
         lastPlusClickId = itemId
@@ -419,7 +419,7 @@ object ScriptMenuDispatcher {
     private fun handleMessageMenuClick(param: XC_MethodHook.MethodHookParam) {
         val item = param.args?.firstNotNullOfOrNull { it as? MenuItem } ?: return
         val entry = messageEntries.values.firstOrNull { it.itemId == item.itemId } ?: return
-        param.result = null
+        param.setResult(null)
         val now = System.currentTimeMillis()
         if (lastMessageClickId == item.itemId && now - lastMessageClickAt < CLICK_DEDUP_MS) return
         lastMessageClickId = item.itemId

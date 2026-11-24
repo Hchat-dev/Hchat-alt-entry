@@ -50,7 +50,13 @@ private class MomentsAutoRefreshRuntime(
 ) {
     private val prefs = HchatStorage.preferences(context.hostContext(), MomentsAutoRefreshSettings.PREFS_NAME)
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == MomentsAutoRefreshSettings.KEY_ENABLE) reconfigure()
+        if (key == MomentsAutoRefreshSettings.KEY_ENABLE) {
+            reconfigure()
+        } else if (key == MomentsAutoRefreshSettings.KEY_INTERVAL_SECONDS) {
+            // 间隔变了要按新周期重建调度器，否则仍然按旧周期轮询。
+            stopScheduler()
+            reconfigure()
+        }
     }
     private var scheduler: ScheduledExecutorService? = null
     private var lastAttemptAt = 0L
@@ -73,9 +79,31 @@ private class MomentsAutoRefreshRuntime(
         }
         if (scheduler?.isShutdown == false) return
         lastAttemptAt = 0L
+        // 轮询粒度不再固定 1 秒。
+        //
+        // 原实现是 scheduleWithFixedDelay(::tick, 1, 1, SECONDS)，而 tick 内部
+        // 先自增写入 lastAttemptAt、再判断「距上次不足 intervalMillis 就返回」，
+        // 默认间隔 300 秒 = 300 次唤醒才做 1 次真实刷新。线程每秒醒来会让 CPU
+        // 无法进入深度休眠，长时间挂后台就是持续的耗电，同时在主频波动下也会
+        // 影响前台滑动的流畅度。
+        //
+        // 改成按「实际刷新间隔」调度，上限 60 秒：
+        // - 间隔 ≤ 60 秒时完全对齐用户设置，不浪费；
+        // - 间隔更长时按 60 秒检查一次，仍然满足时间窗口（默认 8:00–22:00）
+        //   的分钟级判断精度，唤醒次数下降约 98%。
+        val intervalSeconds = prefs.getInt(
+            MomentsAutoRefreshSettings.KEY_INTERVAL_SECONDS,
+            MomentsAutoRefreshSettings.DEFAULT_INTERVAL_SECONDS
+        ).coerceAtLeast(1)
+        val pollSeconds = intervalSeconds.toLong().coerceAtMost(MAX_POLL_INTERVAL_SECONDS)
         scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "Hchat-MomentsAutoRefresh").apply { isDaemon = true }
-        }.also { it.scheduleWithFixedDelay(::tick, 1, 1, TimeUnit.SECONDS) }
+        }.also {
+            // 首次延迟必须是 0：原来首参传 pollSeconds，等于开启功能后要等一整个
+            // 轮询周期（最长 60 秒）才做第一次判断，用户以为开关没生效。
+            // tick 内部本来就有 now - lastAttemptAt < intervalMillis 的闸门，不会因此多刷。
+            it.scheduleWithFixedDelay(::tick, 0, pollSeconds, TimeUnit.SECONDS)
+        }
     }
 
     @Synchronized
@@ -120,5 +148,8 @@ private class MomentsAutoRefreshRuntime(
 
     companion object {
         private const val RETRY_DELAY_MS = 30_000L
+
+        /** 轮询上限：间隔再长也至少每分钟检查一次，兼顾时间窗口精度与耗电。 */
+        private const val MAX_POLL_INTERVAL_SECONDS = 60L
     }
 }

@@ -15,6 +15,7 @@ import org.luckypray.dexkit.query.FindMethod
 import org.luckypray.dexkit.query.matchers.ClassMatcher
 import org.luckypray.dexkit.query.matchers.MethodMatcher
 import java.lang.reflect.Constructor
+import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Member
 import java.lang.reflect.Modifier
@@ -24,11 +25,12 @@ import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Homepage-only projection. Never changes the official account's stored parent or message data. */
 internal object ConversationGroupHomeProjection {
     private const val TAG = "[Hchat:ConversationGroupHome]"
-    private const val CACHE = "homepage_projection_v1"
+    private const val CACHE = "homepage_projection_v2"
     private val lifecycleLock = Any()
     @Volatile private var lifecycleGeneration = 0L
     private data class Installation(val lifecycle: Long, val hooks: Long)
@@ -42,9 +44,58 @@ internal object ConversationGroupHomeProjection {
     private data class QueryScope(val installation: Installation, val filter: ConversationTabFilter?, var rootApplied: Boolean = false)
     private val queryScopes = ThreadLocal<ArrayDeque<QueryScope>>()
     private val tabRefreshPending = AtomicBoolean(false)
+    private val probeLogged = AtomicBoolean(false)
+    /** 诊断计数：只打印前几次，避免日志本身成为性能问题。 */
+    private val rootLogs = AtomicInteger()
+    private val pageLogs = AtomicInteger()
+    private val refreshLogs = AtomicInteger()
     private var delayedTabRefresh: Runnable? = null
 
     fun setTabFilter(provider: () -> ConversationTabFilter?) = synchronized(lifecycleLock) { tabFilter = provider }
+
+    /**
+     * 微信所有 Storage 对象都用 {@code field_<name>} 暴露字段，这比 {@code convertTo()} 稳定得多。
+     * 后者返回的 ContentValues 只包含部分列：一旦某个版本裁掉了 username / unReadCount，
+     * 读到的就是 null，而 null 会被上层当成"不是群、不是公众号、没有未读"，
+     * 于是全部会话都被归进"私聊"，其它分组自然一片空白。
+     */
+    private object MissingStorageField
+    private val storageFields = ConcurrentHashMap<String, Any>()
+
+    private fun storageField(clazz: Class<*>?, name: String): Field? {
+        if (clazz == null) return null
+        val key = clazz.name + "#" + name
+        when (val cached = storageFields[key]) {
+            is Field -> return cached
+            MissingStorageField -> return null
+            else -> {}
+        }
+        var current: Class<*>? = clazz
+        var found: Field? = null
+        while (current != null && current != Any::class.java) {
+            found = KavaReflector.declaredFields(current).firstOrNull { it.name == name }
+            if (found != null) break
+            current = current.superclass
+        }
+        found?.let { KavaReflector.accessible(it) }
+        // 键是"类名#字段名"，类集合由当前微信版本决定，实际只有几十个，
+        // 不需要清空——原来 512 就 clear() 会在首页绑定时周期性触发反射风暴。
+        // 保险起见设一个远高于实际规模的硬上限，超限只放弃缓存（下次重算），不清盘。
+        if (storageFields.size < 2048) storageFields[key] = found ?: MissingStorageField
+        return found
+    }
+
+    private fun readStorageString(receiver: Any?, name: String): String? {
+        if (receiver == null) return null
+        val field = storageField(receiver.javaClass, name) ?: return null
+        return runCatching { field.get(receiver) as? String }.getOrNull()
+    }
+
+    private fun readStorageInt(receiver: Any?, name: String): Int? {
+        if (receiver == null) return null
+        val field = storageField(receiver.javaClass, name) ?: return null
+        return runCatching { (field.get(receiver) as? Number)?.toInt() }.getOrNull()
+    }
     fun hasTabFilterInQuery(): Boolean = queryScopes.get()?.lastOrNull()
         ?.takeIf { isActive(it.installation) }?.filter?.active == true
 
@@ -135,22 +186,26 @@ internal object ConversationGroupHomeProjection {
         }
         val prefs = DexMethodCache.prefs(context.hostContext(), "Hchat_conversation_group_home_cache")
         val runtime = DexMethodCache.runtimeKey(context.hostContext(), context.hostClassLoader())
+        val rootsProbedKey = "$runtime:homepage_tabs_root_probed"
         var methods = DexMethodCache.loadList(prefs, runtime, context.hostClassLoader(), CACHE)
+        fun isRoot(method: Method) =
+            method.parameterTypes.isEmpty() && method.returnType == String::class.java
         fun cacheComplete(cached: List<Method>): Boolean {
             val legacy = cached.filter { it.parameterTypes.size == 2 && it.returnType.isArray }
             val modern = cached.filter { it.parameterTypes.size == 1 && !it.returnType.isPrimitive }
-            val roots = cached.filter {
-                it.parameterTypes.isEmpty() && it.returnType == String::class.java
-            }
+            val roots = cached.filter(::isRoot)
             val notices = cached.filter {
                 it.parameterTypes.size == 3 && it.returnType == Void.TYPE
             }
             val updates = cached.filter(::isModernUpdate)
             return (legacy.isNotEmpty() || modern.isNotEmpty()) &&
-                (legacy.isEmpty() || roots.size == 1 && notices.size >= legacy.size) &&
+                (legacy.isEmpty() || roots.isNotEmpty() && notices.size >= legacy.size) &&
                 (modern.isEmpty() || modern.all { page ->
                     updates.any { it.declaringClass.isAssignableFrom(page.declaringClass) }
-                })
+                }) &&
+                // 父级条件方法可能确实不存在（候选不唯一时我们会主动放弃），
+                // 因此必须单独记住"已经找过"，否则每次启动都要重跑一遍 DexKit。
+                prefs.getBoolean(rootsProbedKey, false)
         }
         if (!cacheComplete(methods)) {
             fun find(vararg anchors: String): List<Method> = context.dexKitBridge().findMethod(FindMethod().apply {
@@ -161,8 +216,21 @@ internal object ConversationGroupHomeProjection {
                 .filter { it.parameterTypes.size == 2 && it.returnType.isArray }
             val modern = find("all flag is same, count:", "message_fold_config2")
                 .filter { it.parameterTypes.size == 1 && !it.returnType.isPrimitive }
-            val roots = if (legacy.isEmpty()) emptyList() else find("((parentRef is null)")
-                .filter { it.parameterTypes.isEmpty() && it.returnType == String::class.java && it.declaringClass.name.startsWith("com.tencent.mm.storage.") }
+            // 首页父级 WHERE 的构造方法。8.0.80 起旧版 ConversationWithCacheAdapter 入口已经消失，
+            // 但这个方法仍在，且是现代分页路径唯一能拿到 SQL 谓词的位置。
+            // 注意：混淆后类名会落到根包（例如 lt4/h），不能按 com.tencent.mm.storage.* 过滤 ——
+            // 那会把唯一候选全部滤掉，导致标签过滤永远只能靠逐行隐藏（分页被掏空后就不再加载）。
+            val roots = find("((parentRef is null)")
+                .filter(::isRoot)
+                .distinctBy { it.declaringClass.name + "#" + it.name }
+                .let { candidates ->
+                    if (candidates.size > 1) {
+                        HLog.e("$TAG 首页父级条件候选不唯一(${candidates.size})，本次跳过 SQL 下推")
+                        emptyList()
+                    } else {
+                        candidates
+                    }
+                }
             val notices = if (legacy.isEmpty()) emptyList() else find("unreadcheck onConversationStorageNotifyChange")
                 .filter { method -> legacy.any { it.declaringClass == method.declaringClass } && method.parameterTypes.size == 3 }
             val updates = if (modern.isEmpty()) emptyList() else find("remove conv, parentRef:")
@@ -172,6 +240,8 @@ internal object ConversationGroupHomeProjection {
             check(modern.isEmpty() || updates.isNotEmpty()) { "新版首页刷新入口不完整" }
             methods = (legacy + modern + roots + notices + updates).distinct()
             DexMethodCache.saveList(prefs, runtime, CACHE, methods)
+            prefs.edit().putBoolean(rootsProbedKey, true).apply()
+            HLog.e("$TAG 首页入口 legacy=${legacy.size} modern=${modern.size} roots=${roots.size} updates=${updates.size}")
         }
         val legacy = methods.filter { it.returnType.isArray }
         val modern = methods.filter { it.parameterTypes.size == 1 && !it.returnType.isPrimitive }
@@ -197,32 +267,47 @@ internal object ConversationGroupHomeProjection {
                 }
             }, installation) }
         }
-        methods.filter { it.returnType == String::class.java && it.parameterTypes.isEmpty() }.forEach { root ->
+        methods.filter(::isRoot).forEach { root ->
             hook(root, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    if (!isActive(installation)) return
-                    if ((legacyDepth.get() ?: 0) <= 0 || param.hasThrowable()) return
-                    val scope = queryScopes.get()?.lastOrNull()?.takeIf { it.installation == installation } ?: return
+                    if (!isActive(installation) || param.hasThrowable()) return
+                    val original = param.result as? String ?: return
                     synchronized(lifecycleLock) {
                         if (!isActive(installation)) return
                         legacyStorage = WeakReference(param.thisObject)
                     }
-                    val original = param.result as? String ?: return
-                    val filter = scope.filter
+                    // 这里**不能**再要求处于 queryScopes 作用域内。
+                    // 8.0.80 的首页查询并不保证在分页方法内部拼 SQL：实测根条件方法常在
+                    // 作用域外被调用，于是旧逻辑每次都直接 return，谓词永远进不了 SQL，
+                    // 标签过滤就只剩下"逐行隐藏"，公众号这类需要"主动保留"的分组必然空白。
+                    val filter = tabFilter()
+                    val hidden = hiddenIds()
                     if (filter?.active == true) {
-                        param.result = filter.rootWhere(original)
+                        val rewritten = filter.rootWhere(original)
+                        param.result = rewritten
                         markQueryFilterApplied()
-                    } else {
-                        param.result = ConversationGroupHomeVisibility.rootWhere(original, hiddenIds())
+                        if (rootLogs.incrementAndGet() <= 3) {
+                            HLog.e("$TAG 根条件已下推 tab=${filter.tab.kind} " +
+                                "before=${original.take(140)} after=${rewritten.take(300)}")
+                        }
+                    } else if (hidden.isNotEmpty()) {
+                        param.result = ConversationGroupHomeVisibility.rootWhere(original, hidden)
+                        markQueryFilterApplied()
                     }
                 }
             }, installation)
         }
         modern.forEach { page ->
-            val conversion = KavaReflector.declaredMethods(page.declaringClass).single { method ->
-                method.parameterTypes.size == 2 && method.parameterTypes.all { it.name.startsWith("com.tencent.mm.storage.") } &&
-                    method.returnType != Void.TYPE && !method.returnType.isPrimitive
+            fun conversions(strict: Boolean) = KavaReflector.declaredMethods(page.declaringClass).filter { method ->
+                method.parameterTypes.size == 2 &&
+                    method.parameterTypes.none { it.isPrimitive || it == String::class.java } &&
+                    method.returnType != Void.TYPE && !method.returnType.isPrimitive &&
+                    (!strict || method.parameterTypes.all { it.name.startsWith("com.tencent.mm.storage.") })
             }
+            // 优先沿用"两个 storage 参数"这个最精确的特征；混淆后包名可能被抹平，
+            // 此时退回到仅按形状匹配，避免整个首页投影安装失败。
+            val conversion = (conversions(true).singleOrNull() ?: conversions(false).singleOrNull())
+                ?: error("未定位到首页行转换方法")
             val rowType = conversion.returnType
             val conversation = KavaReflector.declaredFields(rowType).single {
                 !Modifier.isStatic(it.modifiers) && it.type == conversion.parameterTypes[0]
@@ -236,10 +321,17 @@ internal object ConversationGroupHomeProjection {
             val visible = KavaReflector.declaredMethods(page.declaringClass).single {
                 it.returnType == Boolean::class.javaPrimitiveType && it.parameterTypes.contentEquals(arrayOf(rowType))
             }
+            val storageClass = conversion.parameterTypes[0]
+            val convertTo = KavaReflector.declaredMethods(storageClass)
+                .firstOrNull { it.name == "convertTo" && it.parameterTypes.isEmpty() }
+                ?.let { KavaReflector.accessible(it) }
+
             fun username(row: Any?): String? {
                 val native = KavaReflector.readField(conversation, row) ?: return null
-                // convertTo is the native storage object's stable public serialization API.
-                val values = KavaReflector.invokeMethod(native, "convertTo") as? android.content.ContentValues
+                readStorageString(native, "field_username")?.takeIf { it.isNotEmpty() }?.let { return it }
+                // 回退：convertTo 是 Storage 对象的公开序列化接口，但只导出部分列。
+                val values = convertTo?.let { runCatching { it.invoke(native) }.getOrNull() }
+                    as? android.content.ContentValues
                 return values?.getAsString("username")
             }
             hook(page, object : XC_MethodHook() {
@@ -252,20 +344,65 @@ internal object ConversationGroupHomeProjection {
                     if (param.hasThrowable()) return
                     updates.firstOrNull { it.declaringClass.isInstance(param.thisObject) }
                         ?.let { captureRefresh(installation, param.thisObject, Refresh(it)) }
-                    val hidden = if (hasTabFilterInQuery()) emptySet() else hiddenIds()
-                    if (hidden.isEmpty()) return
+                    // SQL 下推只是"尽力而为"：它能保证分页被填满，但一旦谓词没进 SQL，
+                    // 就只剩逐行隐藏，公众号这类需要"主动保留"的分组会整片空白。
+                    // 因此这里对分页结果再做一次投影，作为最终保底。
+                    val filter = tabFilter()
+                    val active = filter?.active == true
+                    val hidden = hiddenIds()
+                    if (!active && hidden.isEmpty()) return
                     runCatching {
                         val result = param.result ?: return
                         val rows = KavaReflector.readField(listField, result) as? List<*> ?: return
-                        val filtered = rows.filterNot { username(it) in hidden }
-                        if (filtered.size != rows.size) {
+                        if (rows.isEmpty()) return
+                        val logPage = pageLogs.incrementAndGet() <= 4
+                        // 这里是微信首页的绑定路径，逐行反射本身就是免费不了的开销。
+                        // 原来每行要算两次 username（一次过滤、一次日志样本），日志那次还
+                        // 多走一遍 convertTo 兜底。改成只算一次、样本顺手攒着。
+                        val keep = ArrayList<Any?>(rows.size)
+                        val sample = StringBuilder()
+                        for ((index, row) in rows.withIndex()) {
+                            val native = KavaReflector.readField(conversation, row)
+                            val name = username(row)
+                            if (logPage && index < 5) {
+                                if (sample.isNotEmpty()) sample.append(',')
+                                sample.append(name.orEmpty())
+                            }
+                            // 读不到会话名时保留：宁可多显示一行，也不要把整页误判成某一类。
+                            if (name.isNullOrEmpty()) {
+                                keep += row
+                                continue
+                            }
+                            if (name in hidden) continue
+                            if (!active) {
+                                keep += row
+                                continue
+                            }
+                            // active 由 filter 推导，走到这里 filter 必然非空（K2 已智能转换）。
+                            val current = filter
+                            val verify = contact?.let { KavaReflector.readField(it, row) }
+                            if (current.accepts(
+                                    name,
+                                    readStorageInt(native, "field_unReadCount") ?: 0,
+                                    readStorageInt(native, "field_unReadMuteCount") ?: 0,
+                                    readStorageInt(verify, "field_verifyFlag") ?: 0
+                                )
+                            ) {
+                                keep += row
+                            }
+                        }
+                        if (logPage) {
+                            HLog.e("$TAG 分页投影 tab=${filter?.tab?.kind} rows=${rows.size} keep=${keep.size} " +
+                                "sample=$sample")
+                        }
+                        if (keep.size != rows.size) {
                             if (rows is MutableList<*>) {
                                 @Suppress("UNCHECKED_CAST")
                                 val mutable = rows as MutableList<Any?>
                                 mutable.clear()
-                                mutable.addAll(filtered)
+                                mutable.addAll(keep)
                             } else {
-                                check(KavaReflector.writeField(listField, result, ArrayList(filtered)))
+                                check(KavaReflector.writeField(listField, result, ArrayList(keep)))
                             }
                         }
                         // Keep native hasMore and next flag unchanged, including completely hidden pages.
@@ -280,13 +417,24 @@ internal object ConversationGroupHomeProjection {
                     val filter = tabFilter()
                     if (filter?.active == true) {
                         val row = param.args.firstOrNull()
-                        val native = KavaReflector.readField(conversation, row) ?: return
-                        val values = KavaReflector.invokeMethod(native, "convertTo") as? android.content.ContentValues ?: return
+                        val native = KavaReflector.readField(conversation, row)
                         val nativeContact = contact?.let { KavaReflector.readField(it, row) }
-                        val contactValues = nativeContact?.let { KavaReflector.invokeMethod(it, "convertTo") } as? android.content.ContentValues
-                        param.result = filter.accepts(values.getAsString("username").orEmpty(),
-                            values.getAsInteger("unReadCount") ?: 0, values.getAsInteger("unReadMuteCount") ?: 0,
-                            contactValues?.getAsInteger("verifyFlag") ?: 0)
+                        val name = username(row)
+                        if (name.isNullOrEmpty()) {
+                            // 拿不到会话名时不要隐藏：否则会被当成"不是群、不是公众号"，
+                            // 整页都被归进私聊，其他分组就永远空白。
+                            if (probeLogged.compareAndSet(false, true)) {
+                                HLog.e("$TAG 首页行缺少 username(${row?.javaClass?.name})，本行不参与标签过滤")
+                            }
+                            return
+                        }
+                        val unread = readStorageInt(native, "field_unReadCount") ?: 0
+                        val muted = readStorageInt(native, "field_unReadMuteCount") ?: 0
+                        val verify = readStorageInt(nativeContact, "field_verifyFlag") ?: 0
+                        if (probeLogged.compareAndSet(false, true)) {
+                            HLog.e("$TAG 标签判定样本 user=$name unread=$unread muted=$muted verify=$verify tab=${filter.tab.kind}")
+                        }
+                        param.result = filter.accepts(name, unread, muted, verify)
                         return
                     }
                     val hidden = hiddenIds()
@@ -375,6 +523,9 @@ internal object ConversationGroupHomeProjection {
                             }
                         }
                     }.onFailure { HLog.e("$TAG 刷新首页投影失败", it) }
+                }
+                if (current.isEmpty() && refreshLogs.incrementAndGet() <= 2) {
+                    HLog.e("$TAG 没有可用的刷新入口，标签切换不会重查首页（投影只在下次原生刷新时生效）")
                 }
             }
         }

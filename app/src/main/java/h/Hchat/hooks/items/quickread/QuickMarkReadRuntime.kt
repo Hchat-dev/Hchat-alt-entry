@@ -65,6 +65,28 @@ object QuickMarkReadRuntime {
     @Volatile private var nativeMarkReadMethod: Method? = null
     @Volatile private var nativeMarkReadStorage: Any? = null
 
+    // dispatchTouchEvent 是全应用最热的路径之一（含滚动 MOVE 洪流），
+    // 原来每个事件都经 HchatStorage 查一次 FastKV，这里改读缓存 + 配置变更失效。
+    @Volatile private var dragEnabledCache: Boolean? = null
+    @Volatile private var dragListenerBound = false
+
+    private val dragPrefsListener =
+        android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == null || key == QuickMarkReadSettings.KEY_DRAG_READ) dragEnabledCache = null
+        }
+
+    private fun bindDragListener(context: Context) {
+        if (dragListenerBound) return
+        synchronized(this) {
+            if (dragListenerBound) return
+            runCatching {
+                HchatStorage.preferences(context, QuickMarkReadSettings.PREFS_NAME)
+                    .registerOnSharedPreferenceChangeListener(dragPrefsListener)
+            }
+            dragListenerBound = true
+        }
+    }
+
     fun install(context: FeatureContext) {
         featureContext = context
         if (!installed.compareAndSet(false, true)) return
@@ -81,11 +103,14 @@ object QuickMarkReadRuntime {
     @JvmStatic
     fun isDragEnabled(context: Context?): Boolean {
         if (context == null) return false
-        val prefs = HchatStorage.preferences(context, QuickMarkReadSettings.PREFS_NAME)
-        return prefs.getBoolean(
+        bindDragListener(context)
+        dragEnabledCache?.let { return it }
+        val v = HchatStorage.preferences(context, QuickMarkReadSettings.PREFS_NAME).getBoolean(
             QuickMarkReadSettings.KEY_DRAG_READ,
             QuickMarkReadSettings.DEFAULT_DRAG_READ
         )
+        dragEnabledCache = v
+        return v
     }
 
     @JvmStatic

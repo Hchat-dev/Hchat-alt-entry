@@ -55,7 +55,7 @@ class WeChatLocalMessageApi(
                     val args = param.args ?: return
                     val talker = args.getOrNull(0) as? String ?: return
                     if (talker != pending.talker) return
-                    param.result = pending.createTime
+                    param.setResult(pending.createTime)
                 }
             })
             createTimeHookInstalled = true
@@ -86,16 +86,27 @@ class WeChatLocalMessageApi(
             log("插入系统消息失败: 本地消息API未就绪")
             return 0L
         }
-        if (!useWechatCreateTime && !installCreateTimeHook()) {
-            log("插入系统消息失败: createTime hook 未就绪")
-            return 0L
+        // 指定时间插入依赖 createTime 方法能否定位到。
+        // 定位不到时不要把整条提示放弃掉：退回微信自己算的时间，提示会落在会话末尾
+        // 而不是原消息下方，但至少用户能看到——比整条提示消失好得多。
+        val pinnedCreateTime = if (!useWechatCreateTime) {
+            if (installCreateTimeHook()) {
+                normalizeCreateTimeMillis(createTime)
+            } else {
+                // 措辞里带「未找到」是为了通过 WechatApiFeature.isImportantLog 的关键字过滤，
+                // 否则这句降级提示会被整条吞掉，排查时看不到。
+                log("createTime 方法未找到，提示改按微信当前时间插入（位置可能不在原消息下方）")
+                null
+            }
+        } else {
+            null
         }
         return runCatching {
             insertViaWechatSystemMessageMethod(
                 finder,
                 talker.orEmpty(),
                 content.orEmpty(),
-                if (useWechatCreateTime) null else normalizeCreateTimeMillis(createTime)
+                pinnedCreateTime
             )?.let {
                 return@runCatching it
             }

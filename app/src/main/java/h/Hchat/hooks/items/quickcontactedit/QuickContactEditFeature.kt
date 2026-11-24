@@ -200,7 +200,7 @@ private class QuickContactEditRuntime(
         if (item.itemId != SNS_MENU_ITEM_ID) return
         val target = snsMenuBindings.remove(item) ?: pendingSnsMenuTarget ?: return
         pendingSnsMenuTarget = null
-        param.result = if (method.returnType == Boolean::class.javaPrimitiveType) true else null
+        param.setResult(if (method.returnType == Boolean::class.javaPrimitiveType) true else null)
         main.post { showActions(target) }
     }
 
@@ -437,7 +437,7 @@ private class QuickContactEditRuntime(
         val item = param.args?.getOrNull(0) as? MenuItem ?: return
         if (item.itemId != MENU_ITEM_ID) return
         val target = bindings.remove(item) ?: return
-        param.result = null
+        param.setResult(null)
         main.post { showActions(target) }
     }
 

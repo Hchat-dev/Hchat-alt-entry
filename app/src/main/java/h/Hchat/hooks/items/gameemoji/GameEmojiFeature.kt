@@ -106,12 +106,17 @@ private class GameEmojiRuntime(
         val activity = (WeChatApis.currentActivity()?.currentActivity() as? Activity)
             ?.takeUnless { it.isFinishing || it.isDestroyed }
             ?: return
+        val pending = PendingSend(method, param.thisObject, param.args.copyOf(), gameType)
         if (!dialogShowing.compareAndSet(false, true)) {
-            param.result = null
+            // 弹窗还在显示时又点了一次（连点、或上一次没关掉）。
+            // 原来这里只做 param.result = null 就返回：这一下点击被静默吞掉，
+            // 消息既不发送也没有任何提示，用户以为发出去了。
+            // 现在改用原生随机结果立即补发（replaying 标志保证不会重入本 hook）。
+            param.setResult(null)
+            replay(pending, null)
             return
         }
-        val pending = PendingSend(method, param.thisObject, param.args.copyOf(), gameType)
-        param.result = null
+        param.setResult(null)
         mainHandler.post {
             if (activity.isFinishing || activity.isDestroyed) {
                 dialogShowing.set(false)

@@ -77,21 +77,44 @@ private class MomentsAutoLikeRuntime(
                 cancelPendingLikes()
             }
             enabledState = enabled
+            // 开关变化后重算订阅：关闭时立即退订，避免功能关着仍接收朋友圈回调。
+            refreshSubscriptions()
         }
     }
     private var postSubscription: WeChatSnsPostObserver.Subscription? = null
     private var deleteSubscription: WeChatDatabaseListenerApi.Subscription? = null
 
     fun start() {
+        // 偏好监听必须先注册，用户之后打开开关时才能把订阅补上。
+        prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
+        refreshSubscriptions()
+    }
+
+    /**
+     * 按当前开关状态决定是否持有朋友圈/数据库订阅。
+     *
+     * 原实现无条件订阅并读取历史记录，功能默认关闭时这些开销没有收益。
+     */
+    private fun refreshSubscriptions() {
+        if (!enabledState) {
+            postSubscription?.unsubscribe()
+            postSubscription = null
+            deleteSubscription?.unsubscribe()
+            deleteSubscription = null
+            return
+        }
         loadSuccessfulRecords()
-        if (enabledState && prefs.getLong(MomentsAutoLikeSettings.KEY_ENABLED_AT_SECONDS, 0L) <= 0L) {
+        if (prefs.getLong(MomentsAutoLikeSettings.KEY_ENABLED_AT_SECONDS, 0L) <= 0L) {
             prefs.edit()
                 .putLong(MomentsAutoLikeSettings.KEY_ENABLED_AT_SECONDS, nowSeconds())
                 .apply()
         }
-        prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
-        postSubscription = snsApi?.observePosts(::onPostStored)
-        deleteSubscription = WeChatApis.databaseChanges()?.subscribe(::onDatabaseChange)
+        if (postSubscription == null) {
+            postSubscription = snsApi?.observePosts(::onPostStored)
+        }
+        if (deleteSubscription == null) {
+            deleteSubscription = WeChatApis.databaseChanges()?.subscribe(::onDatabaseChange)
+        }
     }
 
     fun destroy() {

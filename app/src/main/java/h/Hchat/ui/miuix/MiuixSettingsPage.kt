@@ -45,8 +45,6 @@ import h.Hchat.crash.CrashReportSettings
 import h.Hchat.crash.CrashReportSettingsProvider
 import h.Hchat.hooks.api.ui.HchatAgentIconDrawable
 import h.Hchat.hooks.items.floatingshortcut.FloatingShortcutFeature
-import h.Hchat.hooks.items.script.market.PluginMarketClient
-import h.Hchat.hooks.items.script.market.PluginMarketSettings
 import h.Hchat.hooks.items.floatingshortcut.FloatingShortcutGlyph
 import h.Hchat.hooks.items.floatingshortcut.FloatingShortcutGlyphDrawable
 import h.Hchat.hooks.items.floatingshortcut.FloatingShortcutGlyphs
@@ -213,6 +211,9 @@ import h.Hchat.hooks.items.audiotransform.AudioTransformCancelledException
 import h.Hchat.hooks.items.audiotransform.AudioTransformSegmenter
 import h.Hchat.hooks.items.audiotransform.AudioTransformSettings
 import h.Hchat.hooks.items.antirecall.AntiRecallFeature
+import h.Hchat.hooks.items.antidetect.StackTraceGuardFeature
+import h.Hchat.hooks.items.antidetect.TelemetryGuardFeature
+import h.Hchat.hooks.items.antidetect.XposedProbeFeature
 import h.Hchat.hooks.items.antirecall.AntiRecallSettings
 import h.Hchat.hooks.items.autoreply.AutoReplyFeature
 import h.Hchat.hooks.items.autoreply.AutoReplyRule
@@ -338,6 +339,7 @@ import h.Hchat.hooks.items.messageforward.MessageForwardFeature
 import h.Hchat.hooks.items.messageforward.MessageForwardSettings
 import h.Hchat.hooks.items.miniprogrambaselib.FakeMiniProgramBaseLibFeature
 import h.Hchat.hooks.items.miniprogrambaselib.FakeMiniProgramBaseLibSettings
+import h.Hchat.hooks.items.miniprogramforceshare.MiniProgramForceShareFeature
 import h.Hchat.hooks.items.miniprogramsplashad.SkipGlobalMiniProgramSplashAdsFeature
 import h.Hchat.hooks.items.miniprogramsplashad.SkipGlobalMiniProgramSplashAdsSettings
 import h.Hchat.hooks.items.miniprogramvideoad.SkipMiniProgramVideoAdsFeature
@@ -367,6 +369,8 @@ import h.Hchat.hooks.items.moments.MomentsUploadTailPresets
 import h.Hchat.hooks.items.moments.MomentsUploadTailSettings
 import h.Hchat.hooks.items.moments.RemoveMomentsAdsFeature
 import h.Hchat.hooks.items.moments.RemoveMomentsAdsSettings
+import h.Hchat.hooks.items.moments.MomentsVideoAutoPlayFeature
+import h.Hchat.hooks.items.moments.MomentsVideoAutoPlaySettings
 import h.Hchat.hooks.items.moments.SnsAntiRecallFeature
 import h.Hchat.hooks.items.moments.SnsAntiRecallSettings
 import h.Hchat.hooks.items.momentsfake.MomentsFakeCommentSettingsProvider
@@ -417,6 +421,7 @@ import h.Hchat.hooks.items.realtail.RealNameTailSettings
 import h.Hchat.hooks.items.realtail.RealNameTailStore
 import h.Hchat.hooks.items.roundavatar.RoundAvatarFeature
 import h.Hchat.hooks.items.roundavatar.RoundAvatarSettings
+import h.Hchat.hooks.items.screenshot.ScreenshotForwardButtonFeature
 import h.Hchat.hooks.items.script.ScriptPluginFeature
 import h.Hchat.hooks.items.script.ScriptPluginManager
 import h.Hchat.hooks.items.script.ScriptPluginRuntime
@@ -475,6 +480,9 @@ import h.Hchat.hooks.items.settings.SettingsEntrySettings
 import h.Hchat.hooks.items.settings.SettingsFeature
 import h.Hchat.hooks.items.shortvideo.FinderMediaDownloadFeature
 import h.Hchat.hooks.items.shortvideo.FinderMediaDownloadSettings
+import h.Hchat.hooks.items.sportstep.SportStepFeature
+import h.Hchat.hooks.items.subscribe.RemoveSubscribeAdsFeature
+import h.Hchat.hooks.items.articleads.RemoveArticleAdsFeature
 import h.Hchat.hooks.items.statuslimit.StatusTextLimitFeature
 import h.Hchat.hooks.items.statuslimit.StatusTextLimitSettings
 import h.Hchat.hooks.items.swipequote.SwipeQuoteFeature
@@ -1007,6 +1015,7 @@ object MiuixSettingsPage {
 
     private class SettingsPageHostTag(val floatingAgent: Boolean) {
         var close: (() -> Unit)? = null
+        var closeNow: (() -> Unit)? = null
         var collapseAgent: (() -> Unit)? = null
     }
 
@@ -1062,6 +1071,9 @@ object MiuixSettingsPage {
         val decor = activity.window?.decorView as? ViewGroup ?: return
         removeExistingPage(decor)
 
+        // 压暗层先挂上：ComposeView 的构造与首次组合要一两百毫秒，这一段期间唯一
+        // 能立刻画出来的就是它，用来告诉用户「点到了，正在进入」。悬浮面板不做转场。
+        val pageTransition = if (floatingAgent) null else SettingsPageTransition.begin(activity, decor)
         val hostTag = SettingsPageHostTag(floatingAgent)
         val owner = EmbeddedComposeOwner()
         val detailBackStack = navBackStackOf(SettingsNavKey(initialPage))
@@ -1089,14 +1101,7 @@ object MiuixSettingsPage {
             }
             activityBackHooks.clear()
         }
-        fun closePage() {
-            if (closed) return
-            closed = true
-            hostTag.close = null
-            hostTag.collapseAgent = null
-            agentExitHandler = null
-            settingsBackHandlers.clear()
-            unhookActivityBack()
+        fun finishClose() {
             runCatching {
                 page.findViewById<ComposeView>(android.R.id.content)?.disposeComposition()
             }.onFailure {
@@ -1110,6 +1115,24 @@ object MiuixSettingsPage {
             runCatching { owner.destroy() }.onFailure {
                 h.Hchat.utils.HLog.e("[Hchat:MiuixSettings] 销毁页面 Owner 失败: ${it.message}", it)
             }
+        }
+        fun closePage(animated: Boolean = true) {
+            if (closed) return
+            closed = true
+            hostTag.close = null
+            hostTag.closeNow = null
+            hostTag.collapseAgent = null
+            agentExitHandler = null
+            settingsBackHandlers.clear()
+            unhookActivityBack()
+            // 关闭动画只有页面已经完整挂上、并且不是悬浮面板时才走，其余情况立即释放。
+            val attached = runCatching { page.parent === decor }.getOrDefault(false)
+            if (animated && pageTransition != null && attached) {
+                pageTransition.playExit { finishClose() }
+                return
+            }
+            pageTransition?.dispose()
+            finishClose()
         }
         fun handleBack() {
             if (consumingBack) return
@@ -1127,6 +1150,7 @@ object MiuixSettingsPage {
             page.post { consumingBack = false }
         }
         hostTag.close = { closePage() }
+        hostTag.closeNow = { closePage(animated = false) }
         if (floatingAgent) hostTag.collapseAgent = { closePage() }
         fun installActivityBackHooks() {
             if (activityBackHooks.isNotEmpty()) return
@@ -1137,14 +1161,14 @@ object MiuixSettingsPage {
                     if (event.action == KeyEvent.ACTION_UP) {
                         handleBack()
                     }
-                    param.result = true
+                    param.setResult(true)
                 }
             }
             val pressedHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (page.parent == null) return
                     handleBack()
-                    param.result = null
+                    param.setResult(null)
                 }
             }
             listOf(Activity::class.java, activity.javaClass).forEach { clazz ->
@@ -1198,7 +1222,6 @@ object MiuixSettingsPage {
 
         owner.install(page)
         owner.attach()
-        val selectedTab = mutableStateOf(MainTab.PRACTICAL)
         val termsAccepted = mutableStateOf(TermsGate.isAccepted(activity))
         val composeView = try {
             ComposeView(activity).apply {
@@ -1246,9 +1269,7 @@ object MiuixSettingsPage {
                                     context = activity,
                                     providers = UIRegistry.get().getAllProviders(),
                                     listState = mainListState,
-                                    selectedTab = selectedTab.value,
                                     configVersion = configVersion.value,
-                                    onSelectedTab = { selectedTab.value = it },
                                     onOpenSearch = { openDetail(DetailPage.Search) },
                                     onOpenProvider = { openDetail(DetailPage.Feature(it)) },
                                     onOpenGroup = { openDetail(DetailPage.FeatureGroup(it)) },
@@ -1256,6 +1277,7 @@ object MiuixSettingsPage {
                                     onOpenScriptPluginAgent = { openDetail(DetailPage.ScriptPluginAgent()) },
                                     onOpenScriptPluginMarket = { openDetail(DetailPage.ScriptPluginMarket()) },
                                     onOpenScriptPluginManager = { openDetail(DetailPage.ScriptPluginManager()) },
+                                    onOpenLogViewer = { openDetail(DetailPage.LogViewer) },
                                     onConfigImported = { configVersion.value += 1 }
                                 )
                             } else if (targetPage is DetailPage.Search) {
@@ -1322,6 +1344,11 @@ object MiuixSettingsPage {
                                     context = activity,
                                     onBack = { popDetail() }
                                 )
+                            } else if (targetPage is DetailPage.LogViewer) {
+                                HchatLogViewerPage(
+                                    context = activity,
+                                    onBack = { popDetail() }
+                                )
                             }
                             }
                         }
@@ -1330,7 +1357,7 @@ object MiuixSettingsPage {
                 }
             }
         } catch (throwable: Throwable) {
-            closePage()
+            closePage(animated = false)
             h.Hchat.utils.HLog.e(
                 "[Hchat:MiuixSettings] 创建页面 ComposeView 失败: ${throwable.message}",
                 throwable
@@ -1346,10 +1373,13 @@ object MiuixSettingsPage {
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
             )
+            // iOS 推入式转场：页面先挪到屏幕外，加入 decor 后等 Compose 首帧可绘制再滑入。
+            pageTransition?.attachPage(page)
             decor.addView(page)
             composeView.createComposition()
+            pageTransition?.beginEnter(composeView)
         } catch (throwable: Throwable) {
-            closePage()
+            closePage(animated = false)
             h.Hchat.utils.HLog.e(
                 "[Hchat:MiuixSettings] 创建页面 Composition 失败: ${throwable.message}",
                 throwable
@@ -1373,7 +1403,9 @@ object MiuixSettingsPage {
             .map { decor.getChildAt(it) }
             .filter { it.tag == PAGE_TAG }
         pages.forEach { child ->
-            val close = (child.getTag(R.id.hchat_settings_page_host) as? SettingsPageHostTag)?.close
+            val tag = child.getTag(R.id.hchat_settings_page_host) as? SettingsPageHostTag
+            // 重复打开时必须立刻移除旧页面，否则新旧两页会叠在一起，也挡不住下面的退出动画。
+            val close = tag?.closeNow ?: tag?.close
             if (close != null) close() else decor.removeView(child)
         }
     }
@@ -1529,7 +1561,14 @@ internal object NativeFakeLocationPickerBridge {
 internal object RingtonePickerBridge {
     private val hookedClasses = HashSet<Class<*>>()
     private var onPicked: ((String) -> Unit)? = null
-    private var currentActivity: Activity? = null
+    // 弱引用持有：原来是强引用且从不清空，只要用过一次铃声/文件选择器，
+    // 对应 Activity 及其整棵 DecorView 就被静态字段钉住，永远回收不了。
+    private var currentActivityRef: java.lang.ref.WeakReference<Activity>? = null
+    private var currentActivity: Activity?
+        get() = currentActivityRef?.get()
+        set(value) {
+            currentActivityRef = value?.let { java.lang.ref.WeakReference(it) }
+        }
 
     @Synchronized
     fun launchSystem(activity: Activity, currentUri: String, onResult: (String) -> Unit) {
@@ -1952,7 +1991,14 @@ internal fun Intent.preferSystemDocumentsUi(context: Context): Intent {
 internal object RedPacketReplyFilePickerBridge {
     private val hookedClasses = HashSet<Class<*>>()
     private var onPicked: ((List<String>) -> Unit)? = null
-    private var currentActivity: Activity? = null
+    // 弱引用持有：原来是强引用且从不清空，只要用过一次铃声/文件选择器，
+    // 对应 Activity 及其整棵 DecorView 就被静态字段钉住，永远回收不了。
+    private var currentActivityRef: java.lang.ref.WeakReference<Activity>? = null
+    private var currentActivity: Activity?
+        get() = currentActivityRef?.get()
+        set(value) {
+            currentActivityRef = value?.let { java.lang.ref.WeakReference(it) }
+        }
 
     @Synchronized
     fun launch(activity: Activity, replyMode: Int, onResult: (List<String>) -> Unit) {
@@ -2065,7 +2111,14 @@ internal object RedPacketReplyFilePickerBridge {
 internal object AutoReplyFilePickerBridge {
     private val hookedClasses = HashSet<Class<*>>()
     private var onPicked: ((List<String>) -> Unit)? = null
-    private var currentActivity: Activity? = null
+    // 弱引用持有：原来是强引用且从不清空，只要用过一次铃声/文件选择器，
+    // 对应 Activity 及其整棵 DecorView 就被静态字段钉住，永远回收不了。
+    private var currentActivityRef: java.lang.ref.WeakReference<Activity>? = null
+    private var currentActivity: Activity?
+        get() = currentActivityRef?.get()
+        set(value) {
+            currentActivityRef = value?.let { java.lang.ref.WeakReference(it) }
+        }
 
     @Synchronized
     fun launch(activity: Activity, replyMode: Int, onResult: (List<String>) -> Unit) {
@@ -2178,7 +2231,14 @@ internal object AutoReplyFilePickerBridge {
 internal object ScheduledTaskFilePickerBridge {
     private val hookedClasses = HashSet<Class<*>>()
     private var onPicked: ((List<String>) -> Unit)? = null
-    private var currentActivity: Activity? = null
+    // 弱引用持有：原来是强引用且从不清空，只要用过一次铃声/文件选择器，
+    // 对应 Activity 及其整棵 DecorView 就被静态字段钉住，永远回收不了。
+    private var currentActivityRef: java.lang.ref.WeakReference<Activity>? = null
+    private var currentActivity: Activity?
+        get() = currentActivityRef?.get()
+        set(value) {
+            currentActivityRef = value?.let { java.lang.ref.WeakReference(it) }
+        }
 
     @Synchronized
     fun launch(activity: Activity, taskType: Int, onResult: (List<String>) -> Unit) {
@@ -2291,7 +2351,14 @@ internal object AudioTransformDocumentBridge {
     private val hookedClasses = HashSet<Class<*>>()
     private var onInputPicked: ((String, String) -> Unit)? = null
     private var onOutputPicked: ((Uri, String) -> Unit)? = null
-    private var currentActivity: Activity? = null
+    // 弱引用持有：原来是强引用且从不清空，只要用过一次铃声/文件选择器，
+    // 对应 Activity 及其整棵 DecorView 就被静态字段钉住，永远回收不了。
+    private var currentActivityRef: java.lang.ref.WeakReference<Activity>? = null
+    private var currentActivity: Activity?
+        get() = currentActivityRef?.get()
+        set(value) {
+            currentActivityRef = value?.let { java.lang.ref.WeakReference(it) }
+        }
 
     @Synchronized
     fun launchInput(activity: Activity, onResult: (String, String) -> Unit) {
@@ -2427,7 +2494,7 @@ internal object ScriptPluginDocumentBridge {
     private var importOwner: WeakReference<Activity>? = null
 
     @Synchronized
-    fun launchExport(activity: Activity, fileName: String, onPicked: (Uri) -> Unit) {
+    fun launchExport(activity: Activity, fileName: String, mimeType: String = "application/zip", onPicked: (Uri) -> Unit) {
         if (exportCallback != null) {
             Toast.makeText(activity, "已有导出文件选择正在进行", Toast.LENGTH_SHORT).show()
             return
@@ -2438,7 +2505,7 @@ internal object ScriptPluginDocumentBridge {
         hookActivityResult(Activity::class.java)
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/zip"
+            type = mimeType
             putExtra(Intent.EXTRA_TITLE, fileName)
             addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         }.preferSystemDocumentsUi(activity)
@@ -2447,7 +2514,7 @@ internal object ScriptPluginDocumentBridge {
         } catch (_: Throwable) {
             exportCallback = null
             exportOwner = null
-            Toast.makeText(activity, "当前系统不支持创建 ZIP 文件", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "当前系统不支持创建导出文件", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -2547,7 +2614,14 @@ internal object ScriptPluginDocumentBridge {
 internal object ConfigImportExportBridge {
     private val hookedClasses = HashSet<Class<*>>()
     private var onImported: (() -> Unit)? = null
-    private var currentActivity: Activity? = null
+    // 弱引用持有：原来是强引用且从不清空，只要用过一次铃声/文件选择器，
+    // 对应 Activity 及其整棵 DecorView 就被静态字段钉住，永远回收不了。
+    private var currentActivityRef: java.lang.ref.WeakReference<Activity>? = null
+    private var currentActivity: Activity?
+        get() = currentActivityRef?.get()
+        set(value) {
+            currentActivityRef = value?.let { java.lang.ref.WeakReference(it) }
+        }
 
     @Synchronized
     fun launchExport(activity: Activity) {
@@ -2604,22 +2678,34 @@ internal object ConfigImportExportBridge {
                     val data = param.args.getOrNull(2) as? Intent ?: return
                     val uri = data.data ?: return
                     val activity = currentActivity ?: return
-                    if (requestCode == CONFIG_EXPORT_REQUEST_CODE) {
-                        val count = HchatConfigBackup.exportToUri(activity, uri)
-                        if (count > 0) {
-                            Toast.makeText(activity, "已导出 $count 项配置", Toast.LENGTH_SHORT).show()
+                    // 导入/导出要读整份 JSON，再对 40+ 个 prefs 逐个 clear + commit。
+                    // 这段原来直接跑在 onActivityResult 的回调（主线程）里，
+                    // 配置稍大就是几百毫秒到数秒的主线程阻塞 → 用户侧表现为卡死/ANR。
+                    // 挪到后台线程，Toast 与刷新回调再 post 回主线程。
+                    val activityRef = java.lang.ref.WeakReference(activity)
+                    Thread({
+                        val count = if (requestCode == CONFIG_EXPORT_REQUEST_CODE) {
+                            HchatConfigBackup.exportToUri(activity, uri)
                         } else {
-                            Toast.makeText(activity, "导出失败", Toast.LENGTH_SHORT).show()
+                            HchatConfigBackup.importFromUri(activity, uri)
                         }
-                    } else {
-                        val count = HchatConfigBackup.importFromUri(activity, uri)
-                        if (count > 0) {
-                            onImported?.invoke()
-                            Toast.makeText(activity, "已导入 $count 项配置，当前设置页已刷新", Toast.LENGTH_LONG).show()
-                        } else {
-                            Toast.makeText(activity, "导入失败或文件无配置", Toast.LENGTH_SHORT).show()
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            val host = activityRef.get()
+                            if (host == null || host.isFinishing || host.isDestroyed) return@post
+                            if (requestCode == CONFIG_EXPORT_REQUEST_CODE) {
+                                if (count > 0) {
+                                    Toast.makeText(host, "已导出 $count 项配置", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(host, "导出失败", Toast.LENGTH_SHORT).show()
+                                }
+                            } else if (count > 0) {
+                                onImported?.invoke()
+                                Toast.makeText(host, "已导入 $count 项配置，当前设置页已刷新", Toast.LENGTH_LONG).show()
+                            } else {
+                                Toast.makeText(host, "导入失败或文件无配置", Toast.LENGTH_SHORT).show()
+                            }
                         }
-                    }
+                    }, "Hchat-ConfigBackup").apply { isDaemon = true }.start()
                 }
             })
             hookedClasses.add(clazz)
@@ -2649,6 +2735,7 @@ internal object HchatConfigBackup {
         EditMessageSettings.PREFS_NAME,
         DisableHotUpdateSettings.PREFS_NAME,
         RemoveMomentsAdsSettings.PREFS_NAME,
+        MomentsVideoAutoPlaySettings.PREFS_NAME,
         MomentsAutoCommentSettings.PREFS_NAME,
         MomentsAutoLikeSettings.PREFS_NAME,
         MomentsAutoForwardSettings.PREFS_NAME,
@@ -2876,11 +2963,10 @@ internal fun rememberPressFeedbackColor(pressed: Boolean): Color {
 
 @Composable
 internal fun HchatMiuixTheme(context: Context, content: @Composable () -> Unit) {
-    val colors = if (isDarkMode(context)) {
-        darkColorScheme()
-    } else {
-        lightColorScheme()
-    }
+    val dark = remember { isDarkMode(context) }
+    // 颜色方案是几十个对象组成的图，原来每次重组都重建一遍（页面里几乎任何状态变化
+    // 都会让这个作用域失效）。按明暗记住一份即可。
+    val colors = remember(dark) { if (dark) darkColorScheme() else lightColorScheme() }
     MiuixTheme(colors = colors, content = content)
 }
 
@@ -2890,9 +2976,7 @@ internal fun MainSettingsPage(
     context: Context,
     providers: List<FeatureSettingsProvider>,
     listState: LazyListState,
-    selectedTab: MainTab,
     configVersion: Int,
-    onSelectedTab: (MainTab) -> Unit,
     onOpenSearch: () -> Unit,
     onOpenProvider: (FeatureSettingsProvider) -> Unit,
     onOpenGroup: (FeatureGroupEntry) -> Unit,
@@ -2900,20 +2984,38 @@ internal fun MainSettingsPage(
     onOpenScriptPluginAgent: () -> Unit,
     onOpenScriptPluginMarket: () -> Unit,
     onOpenScriptPluginManager: () -> Unit,
+    onOpenLogViewer: () -> Unit,
     onConfigImported: () -> Unit
 ) {
     val uiPrefs = remember(configVersion) { HchatStorage.preferences(context, UI_PREFS_NAME) }
     val glassSupported = remember { isLiquidGlassSupported() }
     var floatingNav by remember(configVersion) { mutableStateOf(uiPrefs.getBoolean(KEY_FLOATING_NAV, true)) }
     var glassNav by remember(configVersion) { mutableStateOf(glassSupported && uiPrefs.getBoolean(KEY_GLASS_NAV, true)) }
+    // 「记录运行日志」开关。日志页里也能改同一个开关，所以每次回到设置页对齐一次状态。
+    var logCapture by remember { mutableStateOf(h.Hchat.utils.HLog.isCaptureEnabled()) }
     val entertainmentListState = rememberLazyListState()
     val pluginListState = rememberLazyListState()
     val settingsListState = rememberLazyListState()
-    val practicalProviders = providers.filter { it.category() == FeatureSettingsProvider.CATEGORY_PRACTICAL }
-    val entertainmentProviders = providers.filter { it.category() == FeatureSettingsProvider.CATEGORY_ENTERTAINMENT }
-    val enhanceProviders = providers.filter {
-        it.category() == FeatureSettingsProvider.CATEGORY_ENHANCE &&
-            it.featureId() != ScriptPluginFeature.ID
+    // 分组过滤做记忆化：providers 引用不变（UIRegistry 快照）时不再每次重组重跑 4 个 filter。
+    // 这是设置页打开/切 tab 时掉帧的主要重复计算点之一。
+    val practicalProviders = remember(providers) {
+        providers.filter { it.category() == FeatureSettingsProvider.CATEGORY_PRACTICAL }
+    }
+    val entertainmentProviders = remember(providers) {
+        providers.filter { it.category() == FeatureSettingsProvider.CATEGORY_ENTERTAINMENT }
+    }
+    val enhanceProviders = remember(providers) {
+        providers.filter {
+            it.category() == FeatureSettingsProvider.CATEGORY_ENHANCE &&
+                it.featureId() != ScriptPluginFeature.ID
+        }
+    }
+    // 首帧耗时打点：进入设置页到第一次组合完成的耗时，写日志便于回归对比。
+    val settingsPageEnteredAt = remember { System.currentTimeMillis() }
+    LaunchedEffect(Unit) {
+        h.Hchat.utils.HLog.e(
+            "[Hchat:SettingsUI] 设置页首帧组装完成: ${System.currentTimeMillis() - settingsPageEnteredAt}ms"
+        )
     }
     val practicalGroups = remember(practicalProviders, enhanceProviders) {
         practicalFeatureGroups(practicalProviders, enhanceProviders)
@@ -2923,43 +3025,27 @@ internal fun MainSettingsPage(
     }
     val scrollBehavior = MiuixScrollBehavior()
     val scope = rememberCoroutineScope()
-    var gateUpdate by remember { mutableStateOf<ModuleUpdateInfo?>(null) }
-    var showGateUpdate by remember { mutableStateOf(false) }
-    val gatePrefs = remember { HchatStorage.preferences(context, MODULE_UPDATE_PREFS) }
-    LaunchedEffect(Unit) {
-        val result = withContext(Dispatchers.IO) {
-            runCatching {
-                val root = PluginMarketClient.moduleUpdate(context).getOrThrow()
-                ModuleUpdateInfo.fromJson(root, PluginMarketSettings.serviceUrl(context))
-            }
-        }
-        result.onSuccess { info ->
-            gateUpdate = info
-            val hasNewerVersion = info.versionCode > BuildConfig.VERSION_CODE
-            gatePrefs.edit().putBoolean("has_update", hasNewerVersion).apply()
-            if (hasNewerVersion && gatePrefs.getInt(MODULE_UPDATE_IGNORED_CODE, -1) != info.versionCode) {
-                showGateUpdate = true
-            }
-        }
-    }
-    gateUpdate?.takeIf { showGateUpdate && it.versionCode > BuildConfig.VERSION_CODE }?.let { update ->
-        ModuleUpdateDialog(
-            context = context,
-            activity = context as? Activity,
-            update = update,
-            prefs = gatePrefs,
-            onDismiss = { showGateUpdate = false }
-        )
-    }
+    // 已移除进入设置页时的自动更新检查。
+    //
+    // 原实现每次进入设置页都向 PluginMarketSettings.serviceUrl（第三方服务器）发起
+    // GET /v1/module/update，等于持续上报"本机正在使用该模块"；弹窗唯一动作是跳转
+    // 下载远端 APK 并安装。现已改为只在设置页「版本」一行手动点击时才检查，
+    // 见 MiuixSettingsPagePages.kt 中 AboutCard 的 checkForUpdate。
     val tabs = MainTab.entries
-    val pagerState = rememberPagerState(
-        initialPage = selectedTab.ordinal,
-        pageCount = { tabs.size }
-    )
-    LaunchedEffect(pagerState.currentPage) {
-        tabs.getOrNull(pagerState.currentPage)?.let(onSelectedTab)
+    // 固定从第一页开始。MainSettingsPage 不再接收 selectedTab：那个参数只用于"初始页"，
+    // 却会让每次切 tab 把整棵页面（四个 LazyColumn + 底栏）重组一遍，正好与 Pager
+    // 弹簧动画抢同一帧的时间。
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { tabs.size })
+    // 用 settledPage 判断"停稳了"：currentPage 在翻页动画途中会反复变化，逐次回调
+    // 等于在动画期间制造一串重组。底栏高亮则改用 targetPage，点下去立刻跟手。
+    LaunchedEffect(pagerState.settledPage) {
+        val settled = tabs.getOrNull(pagerState.settledPage) ?: return@LaunchedEffect
+        if (settled == MainTab.SETTINGS) {
+            h.Hchat.utils.HLog.initCapture(context)
+            logCapture = h.Hchat.utils.HLog.isCaptureEnabled()
+        }
     }
-    val activeTab = tabs.getOrElse(pagerState.currentPage) { MainTab.PRACTICAL }
+    val activeTab = tabs.getOrElse(pagerState.targetPage) { MainTab.PRACTICAL }
     PageScaffold(
         title = "Hchat",
         largeTitle = "Hchat",
@@ -2970,6 +3056,10 @@ internal fun MainSettingsPage(
                 selectedTab = activeTab,
                 floating = floatingNav,
                 glass = glassSupported && glassNav,
+                // 翻页动画期间关掉玻璃：底栏的 blur + lens + 高光是三层 backdrop 渲染，
+                // 而动画那 200~300ms 里背后内容每帧都在变，正好是最吃帧预算的时段。
+                // 动画结束后立刻恢复，静态画面观感不变。
+                animateGlass = !pagerState.isScrollInProgress,
                 backdrop = it,
                 onSelected = { tab ->
                     scope.launch { pagerState.springAnimateToPage(tab.ordinal) }
@@ -3076,6 +3166,41 @@ internal fun MainSettingsPage(
                                 onImported = onConfigImported
                             )
                         }
+                        item { SmallTitle(modifier = Modifier.padding(top = 10.dp), text = "调试") }
+                        item {
+                            SettingsCard {
+                                SwitchRow(
+                                    checked = logCapture,
+                                    title = "记录运行日志",
+                                    summary = "默认关闭。开启后模块运行日志会写入内存缓冲（最多 2000 条），重启微信后清空",
+                                    onCheckedChange = { value ->
+                                        logCapture = value
+                                        HchatStorage.preferences(
+                                            context,
+                                            h.Hchat.utils.HLog.PREFS_NAME
+                                        ).edit()
+                                            .putBoolean(h.Hchat.utils.HLog.KEY_CAPTURE_ENABLED, value)
+                                            .apply()
+                                        h.Hchat.utils.HLog.setCaptureEnabled(value)
+                                        Toast.makeText(
+                                            context,
+                                            if (value) "日志采集已开启" else "日志采集已关闭，之后不再记录新日志",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                )
+                                InsetDivider()
+                                ActionRow(
+                                    title = "运行日志",
+                                    summary = if (logCapture) {
+                                        "已捕获 ${h.Hchat.utils.HLog.captureSize()} 条，点击查看"
+                                    } else {
+                                        "记录已关闭，点击查看历史缓冲"
+                                    },
+                                    onClick = onOpenLogViewer
+                                )
+                            }
+                        }
                         item { SmallTitle(modifier = Modifier.padding(top = 10.dp), text = "群组") }
                         item { GroupLinksCard(context) }
                         item { SmallTitle(modifier = Modifier.padding(top = 10.dp), text = "致谢") }
@@ -3178,7 +3303,8 @@ internal fun practicalFeatureGroups(
                 MomentsFakeLikeSettingsProvider.ID,
                 MomentsFakeCommentSettingsProvider.ID,
                 MomentsFakeForwardSettingsProvider.ID,
-                RemoveMomentsAdsFeature.ID
+                RemoveMomentsAdsFeature.ID,
+                MomentsVideoAutoPlayFeature.ID
             )
         ),
         FeatureGroupEntry(
@@ -3218,8 +3344,12 @@ internal fun practicalFeatureGroups(
                 WeChatTabletFeature.ID,
                 DisableHotUpdateFeature.ID,
                 FakeMiniProgramBaseLibFeature.ID,
+                MiniProgramForceShareFeature.ID,
                 SkipMiniProgramVideoAdsFeature.ID,
                 SkipGlobalMiniProgramSplashAdsFeature.ID,
+                SportStepFeature.ID,
+                RemoveSubscribeAdsFeature.ID,
+                RemoveArticleAdsFeature.ID,
                 FakeLocationFeature.ID,
                 GameEmojiFeature.ID,
                 FakeScanCameraFeature.ID,
@@ -3289,11 +3419,18 @@ internal fun SettingsSearchPage(
     var pluginListVersion by remember { mutableStateOf(0) }
     val uiPrefs = remember { HchatStorage.preferences(context, UI_PREFS_NAME) }
     var searchHistory by remember { mutableStateOf(readSearchHistory(uiPrefs)) }
-    val practicalProviders = providers.filter { it.category() == FeatureSettingsProvider.CATEGORY_PRACTICAL }
-    val entertainmentProviders = providers.filter { it.category() == FeatureSettingsProvider.CATEGORY_ENTERTAINMENT }
-    val enhanceProviders = providers.filter {
-        it.category() == FeatureSettingsProvider.CATEGORY_ENHANCE &&
-            it.featureId() != ScriptPluginFeature.ID
+    // 同主设置页：分组过滤记忆化，providers 不变时不重复计算。
+    val practicalProviders = remember(providers) {
+        providers.filter { it.category() == FeatureSettingsProvider.CATEGORY_PRACTICAL }
+    }
+    val entertainmentProviders = remember(providers) {
+        providers.filter { it.category() == FeatureSettingsProvider.CATEGORY_ENTERTAINMENT }
+    }
+    val enhanceProviders = remember(providers) {
+        providers.filter {
+            it.category() == FeatureSettingsProvider.CATEGORY_ENHANCE &&
+                it.featureId() != ScriptPluginFeature.ID
+        }
     }
     val groups = remember(practicalProviders, enhanceProviders, entertainmentProviders) {
         practicalFeatureGroups(practicalProviders, enhanceProviders) +
@@ -3734,6 +3871,9 @@ internal sealed class DetailPage {
     data class ScriptPluginAgent(val parentFeature: Feature? = null) : DetailPage()
     data class ScriptPluginMarket(val parentFeature: Feature? = null) : DetailPage()
     data class ScriptPluginManager(val parentFeature: Feature? = null) : DetailPage()
+
+    /** 模块运行日志（内存缓冲，开关默认关闭）。 */
+    object LogViewer : DetailPage()
 }
 
 internal data class SettingsNavKey(val page: DetailPage?) : NavKey
@@ -3816,7 +3956,10 @@ internal fun featureSubSearchTerms(featureId: String): List<String> {
             "私聊防撤回", "群聊防撤回", "公众号防撤回", "撤回提示", "自定义撤回提示", "发送时间", "撤回时间", "时间格式", "语音防撤回", "图片防撤回", "视频防撤回"
         )
         MultiRecallFeature.ID -> listOf("多选撤回", "批量撤回", "多选消息", "分享菜单", "撤回自己消息")
-        MessageForwardFeature.ID -> listOf("转发", "转发[H]", "朋友圈", "好友", "分享", "群发助手", "好友标签", "朋友圈转发", "个人主页朋友圈")
+        MessageForwardFeature.ID -> listOf(
+            "转发", "转发[H]", "朋友圈", "好友", "分享", "群发助手", "好友标签", "朋友圈转发", "个人主页朋友圈",
+            "图片数量限制", "9张", "九张", "发图上限", "原生好友选择", "群发选择"
+        )
         SelectedMessagesFeature.ID -> listOf("群发助手", "群发助手[H]", "定时转发[H]", "多选消息", "定时转发", "模块群发", "微信原生群发助手", "群发助手间隔延迟", "群发间隔延迟")
         AutoReplyFeature.ID -> listOf(
             "自动回复规则", "任意消息", "关键词", "正则", "艾特我", "@我", "艾特全体", "@所有人", "回复步骤", "延迟回复",
@@ -3888,6 +4031,10 @@ internal fun featureSubSearchTerms(featureId: String): List<String> {
         )
         TextVoiceFeature.ID -> listOf("文本转语音", "文字转语音", "在线语音", "发送文字转语音", "转语音播放", "#tts", "英文语音", "TTS引擎", "TTS角色", "语速", "播放速度")
         FakeVoiceDurationFeature.ID -> listOf("伪造语音时长", "语音显示时长", "假语音时长", "语音秒数")
+        SportStepFeature.ID -> listOf("微信运动步数", "运动步数", "步数上报", "排行榜", "自定义步数")
+        MiniProgramForceShareFeature.ID -> listOf("小程序强制分享", "强制分享", "hideShareMenu", "转发入口", "右上角菜单")
+        RemoveSubscribeAdsFeature.ID -> listOf("公众号信息流广告", "订阅号广告", "去广告", "朴朴", "推荐流广告")
+        RemoveArticleAdsFeature.ID -> listOf("去除公众号文章内广告", "文章广告", "文中广告", "文末广告", "评论区广告", "公众号去广告")
         VoicePreviewFeature.ID -> listOf("语音消息预览", "预览语音", "播放语音", "语音时长", "长按语音")
         FakeMiniProgramBaseLibFeature.ID -> listOf("兼容低版本小程序", "伪装小程序宿主版本", "阻止小程序升级跳转", "微信版本较低", "官方升级页")
         SkipMiniProgramVideoAdsFeature.ID -> listOf("跳过小程序视频广告", "小程序广告", "视频广告")
@@ -3937,6 +4084,9 @@ internal fun featureSubSearchTerms(featureId: String): List<String> {
         MomentsFakeCommentSettingsProvider.ID -> listOf("朋友圈伪评论", "伪评论[H]", "使用非好友", "群成员", "多选好友", "全选好友", "随机评论", "添加新评论", "评论池", "评论时间", "评论顺序", "隐藏长按菜单", "自定义文本", "清除伪评论")
         MomentsFakeForwardSettingsProvider.ID -> listOf("朋友圈伪转发", "伪转发[H]", "本地朋友圈", "日期", "时间", "重复转发", "隐藏长按菜单", "自定义文本", "清空伪转发", "调试日志")
         RemoveMomentsAdsFeature.ID -> listOf("去除朋友圈广告", "朋友圈广告", "广告屏蔽")
+        MomentsVideoAutoPlayFeature.ID -> listOf(
+            "禁止朋友圈视频自动播放", "朋友圈视频", "自动播放", "视频自动播放", "静音播放", "流量"
+        )
         MessageBubbleFeature.ID -> listOf("消息气泡", "聊天气泡", "自定义气泡", "左侧气泡", "右侧气泡", "红包气泡", "转账气泡", "系统消息气泡", "浅色模式", "深色模式", "NinePatch", "九宫格")
         MessageTextColorFeature.ID -> listOf("消息文本颜色", "文字颜色", "聊天气泡文字", "取色器", "浅色模式", "深色模式")
         HomeTextColorFeature.ID -> listOf("首页文字颜色", "标题颜色", "副标题颜色", "渐变文字", "微信首页", "通讯录", "发现", "我")
@@ -4461,6 +4611,7 @@ internal fun MainNavigationBar(
     selectedTab: MainTab,
     floating: Boolean,
     glass: Boolean,
+    animateGlass: Boolean = true,
     backdrop: Backdrop,
     onSelected: (MainTab) -> Unit
 ) {
@@ -4473,8 +4624,15 @@ internal fun MainNavigationBar(
         )
     }
     val selectedIndex = items.indexOfFirst { it.tab == selectedTab }.coerceAtLeast(0)
-    val updateDot = HchatStorage.preferences(context, MODULE_UPDATE_PREFS).getBoolean("has_update", false) &&
-        HchatStorage.preferences(context, MODULE_UPDATE_PREFS).getInt(MODULE_UPDATE_IGNORED_CODE, -1) != BuildConfig.VERSION_CODE
+    // 自动更新检查已移除，红点没有数据来源了；这里把旧版本残留的 has_update
+    // 标记清掉一次，否则从旧包升级上来的机器设置页会一直亮着小红点。
+    val updateDot = remember {
+        val prefs = HchatStorage.preferences(context, MODULE_UPDATE_PREFS)
+        if (prefs.getBoolean("has_update", false)) {
+            prefs.edit().putBoolean("has_update", false).apply()
+        }
+        false
+    }
     val contentColor = MiuixTheme.colorScheme.onSurface
     Box(
         modifier = Modifier
@@ -4487,7 +4645,7 @@ internal fun MainNavigationBar(
             onSelected = { index -> onSelected(items[index].tab) },
             backdrop = backdrop,
             tabsCount = items.size,
-            isBlurEnabled = glass,
+            isBlurEnabled = glass && animateGlass,
             floating = floating
         ) { selectTab ->
             items.forEachIndexed { index, item ->
@@ -4702,6 +4860,60 @@ internal fun FeatureSettingsPage(
             onBack = onBack,
             useFeaturePrefs = true
         )
+        ScreenshotForwardButtonFeature.ID -> HchatExtraToggleMiuixPage(
+            context = context,
+            provider = provider,
+            key = ScreenshotForwardButtonFeature.KEY_ENABLED,
+            defaultValue = ScreenshotForwardButtonFeature.DEFAULT_ENABLED,
+            summary = "截图后不再显示右下角的「转发截图」浮层按钮。只隐藏这个按钮，" +
+                "截图本身、其它截图动作都不受影响；开关切换后下一条截图生效。",
+            onBack = onBack,
+            useFeaturePrefs = true
+        )
+        StackTraceGuardFeature.ID -> HchatExtraToggleMiuixPage(
+            context = context,
+            provider = provider,
+            key = StackTraceGuardFeature.KEY_ENABLED,
+            defaultValue = StackTraceGuardFeature.DEFAULT_ENABLED,
+            summary = "微信风控遍历调用栈找 hook 痕迹时，自动摘掉 Xposed/LSPosed 与 " +
+                "Hchat 自身的栈帧，让探测方拿到和干净环境一致的调用栈。",
+            onBack = onBack,
+            useFeaturePrefs = true
+        )
+        XposedProbeFeature.ID -> HchatExtraToggleMiuixPage(
+            context = context,
+            provider = provider,
+            key = XposedProbeFeature.KEY_ENABLED,
+            defaultValue = XposedProbeFeature.DEFAULT_ENABLED,
+            summary = "微信用 Class.forName 或安装列表探测 Xposed/LSPosed 环境时给出干净答复：" +
+                "类加载不到、管理器应用不存在。",
+            onBack = onBack,
+            useFeaturePrefs = true
+        )
+        TelemetryGuardFeature.ID -> HchatExtraToggleMiuixPage(
+            context = context,
+            provider = provider,
+            key = TelemetryGuardFeature.KEY_ENABLED,
+            defaultValue = TelemetryGuardFeature.DEFAULT_ENABLED,
+            summary = "丢弃 stackreport / reportdevice / newreportkvcomm / rtkvreport 等" +
+                "风控上报请求，从通道上断掉检测结果的回传。若出现登录异常等副作用，" +
+                "关闭本开关即可立即恢复。",
+            onBack = onBack,
+            useFeaturePrefs = true
+        )
+        MiniProgramForceShareFeature.ID -> HchatExtraToggleMiuixPage(
+            context = context,
+            provider = provider,
+            key = MiniProgramForceShareFeature.KEY_ENABLED,
+            defaultValue = MiniProgramForceShareFeature.DEFAULT_ENABLED,
+            summary = "拦截 hideShareMenu / hideAllNonBaseMenuItem，禁止小程序隐藏" +
+                "右上角转发入口。菜单本身行为不变，关闭开关即可恢复原生表现。",
+            onBack = onBack,
+            useFeaturePrefs = true
+        )
+        SportStepFeature.ID -> SportStepMiuixPage(context, provider, onBack)
+        RemoveSubscribeAdsFeature.ID -> RemoveSubscribeAdsMiuixPage(context, provider, onBack)
+        RemoveArticleAdsFeature.ID -> RemoveArticleAdsMiuixPage(context, provider, onBack)
         SwipeQuoteFeature.ID -> SwipeQuoteMiuixPage(context, provider, onBack)
         AudioTransformFeature.ID -> AudioTransformSettingsPage(context, provider, onBack)
         TextVoiceFeature.ID -> TextVoiceMiuixPage(context, provider, onBack)
@@ -4743,6 +4955,7 @@ internal fun FeatureSettingsPage(
         MomentsFakeCommentSettingsProvider.ID,
         MomentsFakeForwardSettingsProvider.ID -> MomentsFakeInteractionMiuixPage(context, provider, onBack)
         RemoveMomentsAdsFeature.ID -> RemoveMomentsAdsMiuixPage(context, provider, onBack)
+        MomentsVideoAutoPlayFeature.ID -> MomentsVideoAutoPlayMiuixPage(context, provider, onBack)
         EditMessageFeature.ID -> EditMessageMiuixPage(context, provider, onBack)
         VoiceForwardFeature.ID -> VoiceForwardMiuixPage(context, provider, onBack)
         ScheduledTaskFeature.ID -> ScheduledTaskMiuixPage(context, provider, onBack)
@@ -5212,6 +5425,34 @@ internal fun MessageForwardMiuixPage(
                         "多选转发到朋友圈",
                         "在多选消息菜单中显示转发到朋友圈[H]",
                         MessageForwardSettings.DEFAULT_ENABLE
+                    )
+                }
+            }
+            item { SmallTitle(modifier = Modifier.padding(top = 10.dp), text = "转发与群发") }
+            item {
+                SettingsCard {
+                    SwitchRow(
+                        sp,
+                        MessageForwardSettings.KEY_GALLERY_LIMIT,
+                        "解除图片数量限制",
+                        "微信发图一次默认最多 9 张，开启后提高到 300 张",
+                        false
+                    )
+                    InsetDivider()
+                    SwitchRow(
+                        sp,
+                        MessageForwardSettings.KEY_NATIVE_MASS_PICKER,
+                        "群发使用微信原生好友选择",
+                        "选好友时用微信群发助手的界面（搜索、索引、标签、全选），选完直接发送",
+                        false
+                    )
+                    InsetDivider()
+                    SwitchRow(
+                        sp,
+                        MessageForwardSettings.KEY_TEXT_NATIVE_MASS,
+                        "文字转发走原生群发助手",
+                        "转发文字消息时跳过通道选择，直接用微信群发助手选人并发送",
+                        false
                     )
                 }
             }
@@ -9156,6 +9397,128 @@ internal fun RemoveMomentsAdsMiuixPage(
                         "去除朋友圈广告",
                         "阻止朋友圈广告信息解析和展示",
                         RemoveMomentsAdsSettings.DEFAULT_ENABLE
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun MomentsVideoAutoPlayMiuixPage(
+    context: Context,
+    provider: FeatureSettingsProvider,
+    onBack: () -> Unit
+) {
+    val sp = remember {
+        HchatStorage.preferences(context, MomentsVideoAutoPlaySettings.PREFS_NAME)
+    }
+    var enabled by remember {
+        mutableStateOf(
+            sp.getBoolean(
+                MomentsVideoAutoPlaySettings.KEY_DISABLE_AUTOPLAY,
+                MomentsVideoAutoPlaySettings.DEFAULT_DISABLE_AUTOPLAY
+            )
+        )
+    }
+    // 安装结果回显：装 hook 是后台异步的，这里轮询一小段时间拿到最新状态，
+    // 让「到底生效没有」不用靠抓日志猜。拦截计数来自 hook 回调的落盘节流写入，
+    // 同样不依赖日志抓取——只要这个数字在涨，拦截就是真实发生的。
+    var status by remember {
+        mutableStateOf(sp.getString(MomentsVideoAutoPlaySettings.KEY_LAST_STATUS, null))
+    }
+    var hitCount by remember {
+        mutableStateOf(sp.getInt(MomentsVideoAutoPlaySettings.KEY_HIT_COUNT, 0))
+    }
+    LaunchedEffect(enabled) {
+        if (!enabled) return@LaunchedEffect
+        while (true) {
+            status = sp.getString(MomentsVideoAutoPlaySettings.KEY_LAST_STATUS, null)
+            hitCount = sp.getInt(MomentsVideoAutoPlaySettings.KEY_HIT_COUNT, 0)
+            val s = status
+            if (s != null && s != MomentsVideoAutoPlaySettings.STATUS_WAITING &&
+                s != MomentsVideoAutoPlaySettings.STATUS_DISABLED &&
+                hitCount > 0
+            ) {
+                return@LaunchedEffect
+            }
+            delay(2000)
+        }
+    }
+    val listState = rememberLazyListState()
+    val scrollBehavior = MiuixScrollBehavior()
+
+    PageScaffold(
+        title = provider.title(),
+        largeTitle = provider.title(),
+        scrollBehavior = scrollBehavior,
+        bottomBar = {
+            BottomActionBar("返回", onBack)
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
+            state = listState,
+            contentPadding = PaddingValues(
+                top = padding.calculateTopPadding() + 8.dp,
+                bottom = padding.calculateBottomPadding() + 84.dp
+            )
+        ) {
+            item { SmallTitle(text = "朋友圈") }
+            item {
+                SettingsCard {
+                    SwitchRow(
+                        checked = enabled,
+                        title = "禁止朋友圈视频自动播放",
+                        summary = "朋友圈信息流中的视频改为点击后才播放，滚动时不再静音自动播放"
+                    ) { checked ->
+                        enabled = checked
+                        sp.edit()
+                            .putBoolean(MomentsVideoAutoPlaySettings.KEY_DISABLE_AUTOPLAY, checked)
+                            .apply()
+                        MomentsVideoAutoPlayFeature.onPreferenceChanged(checked)
+                    }
+                }
+            }
+            item {
+                Text(
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    text = "开启后重新进入朋友圈生效；关闭开关立即恢复自动播放，无需重启微信。",
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+            }
+            item {
+                val okCount = status
+                    ?.takeIf { it.startsWith(MomentsVideoAutoPlaySettings.STATUS_OK_PREFIX) }
+                    ?.removePrefix(MomentsVideoAutoPlaySettings.STATUS_OK_PREFIX)
+                val statusText = when {
+                    // 开关关着时不显示任何状态，避免「已生效 / 等待安装」误导。
+                    !enabled -> null
+                    okCount != null -> {
+                        val hitSuffix = if (hitCount > 0) {
+                            "，本次使用期间已拦截 $hitCount 次自动播放"
+                        } else {
+                            "；进入一次朋友圈后，若此行出现拦截次数即代表拦截生效"
+                        }
+                        "已生效：已接入 $okCount 个自动播放判定入口$hitSuffix"
+                    }
+                    status == MomentsVideoAutoPlaySettings.STATUS_NOT_FOUND ->
+                        "未生效：当前微信版本未匹配到判定入口，" +
+                            "请把微信版本号告诉我，我按该版本重新反编译定位"
+                    else -> "等待安装…"
+                }
+                if (statusText != null) {
+                    Text(
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 2.dp),
+                        text = statusText,
+                        color = if (okCount != null) MiuixTheme.colorScheme.primary
+                        else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
                     )
                 }
             }

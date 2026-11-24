@@ -5,6 +5,7 @@ import h.Hchat.hooks.items.settings.SettingsFeature
 import h.Hchat.hooks.items.conversationgroup.ConversationGroupHomeProjection
 import h.Hchat.preferences.TermsGate
 import h.Hchat.utils.HLog
+import h.Hchat.utils.SelfFrameRegistry
 import java.util.Collections
 
 /**
@@ -36,6 +37,8 @@ class FeatureManager {
             try {
                 feature.onInit(context)
                 initializedFeatures.add(feature)
+                // 功能类的运行时名（release 下已被 R8 改短），供反检测过滤自身栈帧。
+                SelfFrameRegistry.register(feature.javaClass)
             } catch (e: Throwable) {
                 HLog.e("$TAG onInit 失败: $displayName, error=$e", e)
             }

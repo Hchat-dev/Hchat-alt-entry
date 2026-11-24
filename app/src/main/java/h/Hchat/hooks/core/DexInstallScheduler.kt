@@ -2,6 +2,7 @@ package h.Hchat.hooks.core
 
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import h.Hchat.utils.HLog
 import java.util.concurrent.Callable
 import java.util.concurrent.CancellationException
@@ -18,8 +19,28 @@ object DexInstallScheduler {
     enum class Stage(internal val level: Int) { EARLY(0), BRIDGE(1), WARMUP(2) }
 
     private const val TAG = "[Hchat:DexInstall]"
-    private const val MAX_RETRY_ATTEMPTS = 6
+
+    /**
+     * 单个安装任务的重试上限。
+     *
+     * 原来是 6 次（退避 1/3/6/12/24/48 秒）。当微信版本超出 DexFinder 的适配范围时，
+     * 这些重试不会成功，只会在微信进程里反复触发 DexKit 全 dex 扫描 —— 每次扫描都要
+     * 把 dex 映射进 native 内存，重试期间 DexKit 的空闲释放窗口根本来不及触发，
+     * 表现就是“微信内存一路涨、CPU 也高”。
+     *
+     * 降到 3 次（1/3/6 秒）足够覆盖 DexKit 首次加载慢、Tinker 未 attach 完这类瞬时失败，
+     * 又能在真正不兼容时快速收敛，避免无意义的重试风暴。
+     */
+    private const val MAX_RETRY_ATTEMPTS = 3
     private const val MAX_RETRY_DELAY_MS = 60_000L
+
+    /**
+     * 重试预算耗尽后的冷却时间。
+     *
+     * 同一代次内重复调度（installAll + DexReady）不应重新给预算，否则会形成
+     * 无限重试循环；只有过了这个冷却期才视为"用户重新打开了功能"。
+     */
+    private const val RETRY_BUDGET_COOLDOWN_MS = 30_000L
     private val mainHandler = Handler(Looper.getMainLooper())
     private val states = ConcurrentHashMap<String, State>()
     private val readyLevel = AtomicInteger(0)
@@ -27,7 +48,13 @@ object DexInstallScheduler {
     private val dexKitExecutionLock = Any()
     private val executor = ThreadPoolExecutor(
         1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue<Runnable>(),
-        { runnable -> Thread(runnable, "Hchat-DexInstall").apply { isDaemon = true } }
+        { runnable -> Thread(runnable, "Hchat-DexInstall").apply {
+            isDaemon = true
+            // 冷启动必现掉帧的主因之一：这个线程串行跑几十个功能的 DexKit 全量定位，
+            // 是纯 CPU 密集任务。默认优先级和微信主线程相同，会直接抢首页渲染的 CPU，
+            // 表现是"每次冷启动首页持续掉帧"。降到后台优先级，让主线程先跑完首帧。
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+        } }
     )
 
     fun schedule(
@@ -54,7 +81,18 @@ object DexInstallScheduler {
         if (!isReady(stage)) return@synchronized
         if (!state.running.get() && !state.retryScheduled.get() &&
             state.retryIndex.get() >= MAX_RETRY_ATTEMPTS
-        ) state.retryIndex.set(0)
+        ) {
+            // 预算耗尽后，不要"再调一次 schedule 就清零"。
+            // 现实里 installAll 和 Events.DexReady 会对同一个功能各调一次 schedule，
+            // 原来的写法于是形成"耗尽→清零→再重试 3 次"的循环，正是这次改动想消灭的
+            // 重试风暴。只有距离上次耗尽超过冷却时间才重新给一轮预算，
+            // 并对齐语义：这通常意味着用户重新打开了功能或微信重启。
+            val exhaustedAt = state.retryExhaustedAt
+            if (exhaustedAt == 0L || SystemClock.elapsedRealtime() - exhaustedAt >= RETRY_BUDGET_COOLDOWN_MS) {
+                state.retryIndex.set(0)
+                state.retryExhaustedAt = 0L
+            }
+        }
         runNow(key, state)
     }
 
@@ -184,6 +222,8 @@ object DexInstallScheduler {
         if (index >= MAX_RETRY_ATTEMPTS) {
             state.retryScheduled.set(false)
             state.installer = null
+            // 记录预算耗尽时刻，供 schedule() 判断是否该重新给预算。
+            state.retryExhaustedAt = SystemClock.elapsedRealtime()
             HLog.e("$TAG ${state.label} 多次安装失败，停止本轮重试")
             return
         }
@@ -217,5 +257,7 @@ object DexInstallScheduler {
         val running = AtomicBoolean(false)
         val retryScheduled = AtomicBoolean(false)
         val retryIndex = AtomicInteger(0)
+        /** 重试预算耗尽的时刻；0 表示从未耗尽。 */
+        @Volatile var retryExhaustedAt: Long = 0L
     }
 }

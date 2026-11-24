@@ -17,6 +17,7 @@ import h.Hchat.hooks.core.DexInstallScheduler
 import h.Hchat.hooks.core.FeatureContext
 import h.Hchat.hooks.core.HookRegistry
 import h.Hchat.preferences.HchatStorage
+import h.Hchat.preferences.HotConfig
 import h.Hchat.utils.KavaReflector
 import org.luckypray.dexkit.query.FindMethod
 import org.luckypray.dexkit.query.matchers.MethodMatcher
@@ -26,8 +27,35 @@ object GroupLeaveMonitorHighlighter {
     @Volatile private var textCleanupInstalled = false
     @Volatile private var uriClickInstalled = false
 
+    /**
+     * 高亮开关的进程内缓存。
+     *
+     * 这个 hook 挂在 `android.widget.TextView#setText(CharSequence, BufferType)` 上，
+     * 微信里**任何一个** TextView 设置文字都会经过它——聊天列表滚动、消息气泡刷新、
+     * 标题栏更新、按钮状态变化，全在主线程上，是整机最热的方法之一。
+     *
+     * 原实现把开关判断放在文本扫描之后：即使功能默认关闭，每次 setText 也要先
+     * `toString()` + 3 次 ignoreCase `contains` + 2 次 `contains` + 一次 `lastIndexOf`。
+     * 一屏十几个 TextView、滚动时每帧几十次回调，累积起来就是肉眼可见的掉帧。
+     *
+     * 现在开关提到回调第一行，关闭时只剩一次 volatile 读 + 一次时间比较。
+     */
+    @Volatile
+    private var highlightEnabled: () -> Boolean = { GroupLeaveMonitorSettings.DEFAULT_ENABLE }
+
     fun install(context: FeatureContext, logger: (String, Throwable?) -> Unit): Boolean {
-        val textOk = installTextCleanup(context.hostContext(), logger)
+        val host = context.hostContext()
+        highlightEnabled = HotConfig.flag(
+            GroupLeaveMonitorFeature.ID,
+            GroupLeaveMonitorSettings.KEY_ENABLE,
+            GroupLeaveMonitorSettings.DEFAULT_ENABLE
+        ) {
+            HchatStorage.preferences(host, GroupLeaveMonitorSettings.PREFS_NAME).getBoolean(
+                GroupLeaveMonitorSettings.KEY_ENABLE,
+                GroupLeaveMonitorSettings.DEFAULT_ENABLE
+            )
+        }
+        val textOk = installTextCleanup(host, logger)
         installProfileLinkClick(context, logger)
         return textOk
     }
@@ -62,6 +90,9 @@ object GroupLeaveMonitorHighlighter {
         return runCatching {
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    // 第一行必须是最廉价的判断：功能关闭时这里直接返回，
+                    // 不碰字符串、不碰配置存储。
+                    if (!highlightEnabled()) return
                     val original = param.args?.getOrNull(0) as? CharSequence ?: return
                     val highlighted = highlight(context, original) ?: return
                     param.args[0] = highlighted
@@ -80,6 +111,10 @@ object GroupLeaveMonitorHighlighter {
         original: CharSequence
     ): CharSequence? {
         val raw = original.toString()
+        // 一次 lastIndexOf 替代原来的 3 次 ignoreCase contains + 2 次 contains。
+        // 微信里绝大多数字符串与"退群"无关，这一步就让回调在 O(n) 内退出，
+        // 而 n 通常是 10~30 个字符。
+        if (raw.lastIndexOf(LEAVE_SUFFIX_TEXT) <= 0) return null
         val normalized = normalizeLegacyTemplateXml(raw)
         if (normalized == null &&
             (raw.contains("<_wc_custom_link_", ignoreCase = true) || raw.contains("<sysmsg", ignoreCase = true))
@@ -88,12 +123,8 @@ object GroupLeaveMonitorHighlighter {
         }
         val text = normalized ?: raw
         val notice = findLeaveNotice(text) ?: return null
-        val prefs = HchatStorage.preferences(context, GroupLeaveMonitorSettings.PREFS_NAME)
-        if (!prefs.getBoolean(GroupLeaveMonitorSettings.KEY_ENABLE, GroupLeaveMonitorSettings.DEFAULT_ENABLE)) {
-            return null
-        }
         val color = parseColor(
-            prefs.getString(
+            HchatStorage.preferences(context, GroupLeaveMonitorSettings.PREFS_NAME).getString(
                 GroupLeaveMonitorSettings.KEY_WXID_COLOR,
                 GroupLeaveMonitorSettings.DEFAULT_WXID_COLOR
             )
@@ -240,13 +271,15 @@ object GroupLeaveMonitorHighlighter {
                         val viewContext = param.args?.firstOrNull { it is View }?.let { (it as View).context }
                             ?: context.hostContext()
                         openProfile(viewContext, memberId)
-                        param.result = if (method.returnType == java.lang.Boolean.TYPE ||
-                            method.returnType == Boolean::class.javaObjectType
-                        ) {
-                            true
-                        } else {
-                            null
-                        }
+                        param.setResult(
+                            if (method.returnType == java.lang.Boolean.TYPE ||
+                                method.returnType == Boolean::class.javaObjectType
+                            ) {
+                                true
+                            } else {
+                                null
+                            }
+                        )
                     }
                 })
                 count++

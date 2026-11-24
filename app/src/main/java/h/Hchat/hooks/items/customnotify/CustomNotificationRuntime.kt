@@ -119,6 +119,8 @@ object CustomNotificationRuntime {
     private val nativeForegroundSoundBlockStack = ThreadLocal<ArrayDeque<Boolean>>()
     @Volatile private var avatarRoot: String? = null
     @Volatile private var notificationActionReceiver: BroadcastReceiver? = null
+    /** 注册广播时用的 Context，注销必须用同一个（unregisterReceiver 不匹配会抛 IllegalArgumentException）。 */
+    @Volatile private var notificationActionReceiverContext: Context? = null
     @Volatile private var lastManualSoundAt: Long = 0L
     @Volatile private var methodCachePrefs: android.content.SharedPreferences? = null
 
@@ -190,7 +192,7 @@ object CustomNotificationRuntime {
                             msgSvrId
                         )
                     ) {
-                        param.result = null
+                        param.setResult(null)
                         return
                     }
                     val settings = CustomNotificationSettings(hostContext)
@@ -202,22 +204,22 @@ object CustomNotificationRuntime {
                     markNativeHandled(talker, msgSvrId)
                     if (msgSvrId <= 0L) return
                     if (rule.mode == CustomNotificationSettings.MODE_DND || isInMuteWindow(rule)) {
-                        param.result = null
+                        param.setResult(null)
                         return
                     }
                     when (wechatDoNotDisturbState(rule, talker)) {
                         true -> {
-                            param.result = null
+                            param.setResult(null)
                             return
                         }
                         null -> return
                         false -> Unit
                     }
                     if (shouldSuppressNativeByRule(rule, talker, msgSvrId)) {
-                        param.result = null
+                        param.setResult(null)
                         return
                     }
-                    param.result = null
+                    param.setResult(null)
                     val payload = buildNativePayload(hostContext, rule, notification)
                     executor.execute {
                         runCatching { sendNotification(hostContext, rule, payload) }
@@ -261,7 +263,7 @@ object CustomNotificationRuntime {
                         rule.mode == CustomNotificationSettings.MODE_DND || isInMuteWindow(rule)
                     )
                     stack.addLast(soundPlayers.isNotEmpty() && rule?.sound == false)
-                    if (suppressAll) param.result = null
+                    if (suppressAll) param.setResult(null)
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -275,7 +277,7 @@ object CustomNotificationRuntime {
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (nativeForegroundSoundBlockStack.get()?.peekLast() == true) {
-                        param.result = null
+                        param.setResult(null)
                     }
                 }
             })
@@ -352,7 +354,7 @@ object CustomNotificationRuntime {
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (nativeNotificationBuildStack.get()?.peekLast() != true) return
-                    param.result = null
+                    param.setResult(null)
                 }
             })
         }
@@ -1364,6 +1366,8 @@ object CustomNotificationRuntime {
             }
         }
         notificationActionReceiver = receiver
+        // 复用 applicationContext：Activity 级 Context 被持有会让整棵 View 树泄漏。
+        notificationActionReceiverContext = context.applicationContext ?: context
         val filter = IntentFilter(ACTION_QUICK_REPLY).apply { addAction(ACTION_MARK_READ) }
         try {
             if (Build.VERSION.SDK_INT >= 33) {
@@ -1374,8 +1378,27 @@ object CustomNotificationRuntime {
         } catch (t: Throwable) {
             receiverRegistered.set(false)
             notificationActionReceiver = null
+            notificationActionReceiverContext = null
             HLog.e("$TAG 注册通知动作广播失败: ${t.message}", t)
         }
+    }
+
+    /**
+     * 注销通知动作广播。
+     *
+     * 原来只有注册没有注销：功能关掉后 receiver 仍挂在进程里，旧通知的
+     * 「快捷回复 / 标为已读」广播继续投递进来并触发数据库写入，
+     * 属于关不掉的后台开销。
+     */
+    fun unregisterNotificationActionReceiver() {
+        val receiver = notificationActionReceiver ?: return
+        val context = notificationActionReceiverContext
+        notificationActionReceiver = null
+        notificationActionReceiverContext = null
+        receiverRegistered.set(false)
+        if (context == null) return
+        runCatching { context.unregisterReceiver(receiver) }
+            .onFailure { HLog.e("$TAG 注销通知动作广播失败: ${it.message}", it) }
     }
 
     private fun sendQuickReply(

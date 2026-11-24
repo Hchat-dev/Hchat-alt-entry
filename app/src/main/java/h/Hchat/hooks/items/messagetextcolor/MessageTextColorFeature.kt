@@ -112,6 +112,9 @@ private class MessageTextColorRenderer(
     private fun applyTextColor(param: XC_MethodHook.MethodHookParam) {
         val args = param.args ?: return
         if (args.size < 2) return
+        // 关闭状态下：只有当确实有行应用过样式（需要还原）时才继续，
+        // 否则直接退出，避免每条消息都做一次 findRootView 反射。
+        if (!isEnabled() && appliedBindingStates.isEmpty()) return
         val holder = args[0] ?: return
         val position = args[1] as? Int ?: return
         val root = findRootView(holder) ?: return

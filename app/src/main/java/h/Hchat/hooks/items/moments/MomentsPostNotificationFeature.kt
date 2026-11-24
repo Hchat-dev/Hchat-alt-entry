@@ -85,24 +85,43 @@ private class MomentsPostNotificationRuntime(
                     .apply()
             }
             enabledState = enabled
+            // 开关变化后重算订阅，关闭时立即退订朋友圈动态。
+            refreshSubscription()
         }
     }
     private var subscription: WeChatSnsPostObserver.Subscription? = null
 
     fun start() {
+        // 偏好监听必须先注册，用户之后打开开关时才能把订阅补上。
+        prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
+        refreshSubscription()
+    }
+
+    /**
+     * 按当前开关状态决定是否持有朋友圈动态订阅。
+     *
+     * 原实现无条件 `observePosts`，功能默认关闭时每条朋友圈动态仍会回调进来。
+     */
+    private fun refreshSubscription() {
+        if (!enabledState) {
+            subscription?.unsubscribe()
+            subscription = null
+            return
+        }
         val enabledAtSeconds = prefs.getLong(MomentsPostNotificationSettings.KEY_ENABLED_AT_SECONDS, 0L)
         val observedInitialized = prefs.contains(MomentsPostNotificationSettings.KEY_NOTIFIED_IDS)
-        if (enabledState && (enabledAtSeconds <= 0L || !observedInitialized)) {
+        if (enabledAtSeconds <= 0L || !observedInitialized) {
             synchronized(observed) { observed.clear() }
             prefs.edit()
                 .putLong(MomentsPostNotificationSettings.KEY_ENABLED_AT_SECONDS, nowSeconds())
                 .putString(MomentsPostNotificationSettings.KEY_NOTIFIED_IDS, EMPTY_OBSERVED)
                 .apply()
-        } else if (enabledState) {
+        } else {
             loadObserved()
         }
-        prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
-        subscription = WeChatApis.snsApi()?.observePosts(::onPostStored)
+        if (subscription == null) {
+            subscription = WeChatApis.snsApi()?.observePosts(::onPostStored)
+        }
     }
 
     fun destroy() {

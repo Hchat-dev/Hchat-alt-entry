@@ -19,4 +19,24 @@ class LinkParseMessageGateTest {
         assertNull(LinkParseMessageGate.eligibleTime(msg(type = 49), now))
         assertNull(LinkParseMessageGate.eligibleTime(msg(text = "x".repeat(16_385)), now))
     }
+
+    @Test fun mergedForwardIsEligibleWithinItsOwnSizeBudget() {
+        fun merged(body: String) = msg(
+            type = 49,
+            text = "<msg><appmsg><type>19</type><title>聊天记录</title>" +
+                "<recorditem><![CDATA[$body]]></recorditem></appmsg></msg>"
+        )
+        val record = "<msg><appmsg><type>5</type><url>https://v.douyin.com/bg9DH--cvOc/</url></appmsg></msg>"
+        assertEquals(now, LinkParseMessageGate.eligibleTime(merged(record), now))
+        assertTrue(LinkParseMessageGate.isMergedForward(merged(record)))
+
+        // 普通链接卡（appmsg type 5）不是合并转发，仍然不进入解析。
+        val card = msg(type = 49, text = "<msg><appmsg><type>5</type><url>https://v.douyin.com/x/</url></appmsg></msg>")
+        assertNull(LinkParseMessageGate.eligibleTime(card, now))
+        assertFalse(LinkParseMessageGate.isMergedForward(card))
+
+        // 超过合并转发的体积上限就放弃，避免超长记录拖住解析线程。
+        val oversized = merged("x".repeat(LinkParseMessageGate.MAX_MERGED_TEXT))
+        assertNull(LinkParseMessageGate.eligibleTime(oversized, now))
+    }
 }

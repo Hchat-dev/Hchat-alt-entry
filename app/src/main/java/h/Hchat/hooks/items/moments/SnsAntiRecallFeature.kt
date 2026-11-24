@@ -194,7 +194,7 @@ private class SnsAntiRecallHooker(
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (isMomentAntiRecallEnabled() && isForceLegacyProfileEnabled()) {
-                        param.result = false
+                        param.setResult(false)
                     }
                 }
             })

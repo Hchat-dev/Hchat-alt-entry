@@ -46,11 +46,19 @@ class WorkImageExtractorTest {
         val html = """<script>window.__INITIAL_STATE__={"noteData":{"data":{"noteData":{"noteId":"$id","type":"normal","imageList":[$images]}}}};</script>"""
         val resolved = WorkImageExtractor.xiaohongshu(html, id)!!
         assertEquals(15, resolved.size)
+        // 原图优先（保留动图/GIF），jpg 变体作为兜底候选。
         assertEquals(
-            "https://sns-img-qc.xhscdn.com/oss-sg/notes_pre_post/image0?imageView2/2/w/1920/format/jpg",
-            resolved.first().candidates.single()
+            listOf(
+                "https://sns-img-qc.xhscdn.com/oss-sg/notes_pre_post/image0?imageView2/2/w/1920",
+                "https://sns-img-qc.xhscdn.com/oss-sg/notes_pre_post/image0?imageView2/2/w/1920/format/jpg"
+            ),
+            resolved.first().candidates
         )
-        assertTrue(resolved.all { WorkImageExtractor.allowedXhsImage(it.candidates.single()) })
+        assertTrue(
+            resolved.all { source ->
+                source.candidates.isNotEmpty() && source.candidates.all(WorkImageExtractor::allowedXhsImage)
+            }
+        )
         assertNull(WorkImageExtractor.xiaohongshu(html, "6a9a9fe70000000011033fd1"))
         assertNull(WorkImageExtractor.xiaohongshu(html.replace("\"type\":\"normal\"", "\"type\":\"video\""), id))
     }

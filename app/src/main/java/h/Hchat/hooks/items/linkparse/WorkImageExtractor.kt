@@ -53,9 +53,13 @@ internal object WorkImageExtractor {
             val fileId = image.str("fileId") ?: return@safely null
             if (fileId.length > MAX_FILE_ID_CHARS || fileId.contains("..") ||
                 !fileId.matches(Regex("[A-Za-z0-9/_-]+"))) return@safely null
-            val url = "https://sns-img-qc.xhscdn.com/${fileId.trimStart('/')}?imageView2/2/w/1920/format/jpg"
-            if (!allowedXhsImage(url)) return@safely null
-            WorkImageSource(listOf(url))
+            val base = "https://sns-img-qc.xhscdn.com/${fileId.trimStart('/')}?imageView2/2/w/1920"
+            // 不再强制 format/jpg：那会把动图（GIF）压成静态 JPEG，用户看到的是一张不动的图。
+            // 先按原图取（CDN 原样返回 gif/png/webp/jpeg，由下载层按魔数识别），
+            // 只有原图取不到时才退回旧的 jpg 变体。
+            val candidates = listOf(base, "$base/format/jpg").filter(::allowedXhsImage)
+            if (candidates.isEmpty()) return@safely null
+            WorkImageSource(candidates)
         }
     }
 

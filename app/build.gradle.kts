@@ -10,8 +10,26 @@ android {
     namespace = "h.Hchat"
     compileSdk = 37
 
-    val autoVersionCode = System.getenv("HCAT_VERSION_CODE")?.toIntOrNull() ?: 1
-    val autoVersionName = System.getenv("HCAT_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.0.0"
+    // 版本号规则：**主.次.修订.补丁** 四段，例如 6.9.6.2。
+    // versionCode 由版本名直接推导，不再手填：
+    //   主 * 1_000_000 + 次 * 10_000 + 修订 * 100 + 补丁，6.9.6.2 -> 6090602
+    // 四段式的意义在于：同一轮里的连续修补只动最后一位，不再每改一次就顶一个大版本
+    // （原来 6.9.0 → 6.9.6 一天涨六个版本号，就是这样来的）。
+    // 注意：versionCode 必须大于远端更新接口返回的 versionCode（当前为 544），
+    // 否则进入设置页会一直弹「发现新版本」。
+    // 仍可用环境变量 HCAT_VERSION_NAME 覆盖版本名；HCAT_VERSION_CODE 可单独覆盖编码。
+    fun encodeVersionCode(name: String): Int? {
+        val parts = name.split('.')
+        if (parts.size != 4) return null
+        val numbers = parts.map { it.trim().toIntOrNull() ?: return null }
+        if (numbers.any { it < 0 || it > 99 }) return null
+        return numbers[0] * 1_000_000 + numbers[1] * 10_000 + numbers[2] * 100 + numbers[3]
+    }
+
+    val autoVersionName = System.getenv("HCAT_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "6.9.6.0"
+    val autoVersionCode = System.getenv("HCAT_VERSION_CODE")?.toIntOrNull()
+        ?: encodeVersionCode(autoVersionName)
+        ?: error("版本名必须是「主.次.修订.补丁」四段数字（每段 0-99），当前: $autoVersionName")
 
     defaultConfig {
         applicationId = "h.Hchat"

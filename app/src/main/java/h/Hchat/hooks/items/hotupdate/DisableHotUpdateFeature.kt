@@ -108,7 +108,7 @@ class DisableHotUpdateFeature : BaseFeature() {
                 }
                 HookRegistry.get().hook(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        param.result = 0
+                        param.setResult(0)
                     }
                 })
                 true
@@ -146,7 +146,7 @@ class DisableHotUpdateFeature : BaseFeature() {
                                     setReturnCode.invoke(null, intent, -1)
                                 }
                             }
-                            param.result = blockedReturnValue(method)
+                            param.setResult(blockedReturnValue(method))
                         }
                     })
                 }
@@ -170,7 +170,7 @@ class DisableHotUpdateFeature : BaseFeature() {
             runCatching {
                 HookRegistry.get().hook(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        param.result = blockedReturnValue(method)
+                        param.setResult(blockedReturnValue(method))
                     }
                 })
             }.onFailure {
@@ -217,7 +217,7 @@ class DisableHotUpdateFeature : BaseFeature() {
                 methods.forEach { method ->
                     HookRegistry.get().hook(method, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
-                            param.result = blockedReturnValue(method)
+                            param.setResult(blockedReturnValue(method))
                         }
                     })
                     count++
@@ -257,7 +257,7 @@ class DisableHotUpdateFeature : BaseFeature() {
                 methods.forEach { method ->
                     HookRegistry.get().hook(method, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
-                            param.result = blockedReturnValue(method)
+                            param.setResult(blockedReturnValue(method))
                         }
                     })
                 }
@@ -326,7 +326,7 @@ class DisableHotUpdateFeature : BaseFeature() {
                 methods.forEach { method ->
                     HookRegistry.get().hook(method, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
-                            param.result = blockedReturnValue(method)
+                            param.setResult(blockedReturnValue(method))
                         }
                     })
                 }

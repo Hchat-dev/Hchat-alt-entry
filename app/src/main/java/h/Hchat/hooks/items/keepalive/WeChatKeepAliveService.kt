@@ -10,7 +10,9 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import h.Hchat.BuildConfig
 import h.Hchat.R
+import h.Hchat.preferences.HchatStorage
 import h.Hchat.utils.HLog
 
 class WeChatKeepAliveService : Service() {
@@ -19,24 +21,66 @@ class WeChatKeepAliveService : Service() {
     private var networkHeartbeatEnabled = false
     private val keepAliveTask = object : Runnable {
         override fun run() {
-            WeChatKeepAliveRuntime.watchdogTick(this@WeChatKeepAliveService, watchdogEnabled)
-            WeChatKeepAliveRuntime.heartbeatTick(networkHeartbeatEnabled)
-            handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+            val watchdog = watchdogEnabled
+            val heartbeat = networkHeartbeatEnabled
+            // 两个子功能都关闭时不再续期：原来即使什么都不做，也会每 60 秒
+            // 唤醒一次主线程 Handler，白白阻止 CPU 进入低功耗状态。
+            if (!watchdog && !heartbeat) return
+            WeChatKeepAliveRuntime.watchdogTick(this@WeChatKeepAliveService, watchdog)
+            WeChatKeepAliveRuntime.heartbeatTick(heartbeat)
+            // 息屏时放宽到 5 分钟：保活的目的是别让微信死透，不需要在无人观看时
+            // 每分钟唤醒一次 CPU 和无线电；亮屏立即恢复 60 秒粒度。
+            handler.postDelayed(this, currentIntervalMs())
         }
+    }
+
+    private fun currentIntervalMs(): Long {
+        val interactive = runCatching {
+            (getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager)?.isInteractive
+        }.getOrNull() ?: true
+        return if (interactive) WATCHDOG_INTERVAL_MS else IDLE_INTERVAL_MS
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 系统按 START_STICKY 重建服务时 intent 为 null。原实现在这条路径上把
+        // 两个开关都读成 false，于是前台通知照常显示、看门狗和心跳却永久停摆，
+        // 用户以为保活生效其实什么都没做。这里在 extra 缺失时回读持久化配置。
+        val prefs = HchatStorage.preferences(this, WeChatKeepAliveSettings.PREFS_NAME)
+        watchdogEnabled = if (intent != null && intent.hasExtra(EXTRA_WATCHDOG)) {
+            intent.getBooleanExtra(EXTRA_WATCHDOG, false)
+        } else {
+            prefs.getBoolean(
+                WeChatKeepAliveSettings.KEY_WATCHDOG,
+                WeChatKeepAliveSettings.DEFAULT_WATCHDOG
+            )
+        }
+        networkHeartbeatEnabled = if (intent != null && intent.hasExtra(EXTRA_NETWORK_HEARTBEAT)) {
+            intent.getBooleanExtra(EXTRA_NETWORK_HEARTBEAT, false)
+        } else {
+            prefs.getBoolean(
+                WeChatKeepAliveSettings.KEY_NETWORK_HEARTBEAT,
+                WeChatKeepAliveSettings.DEFAULT_NETWORK_HEARTBEAT
+            )
+        }
         return runCatching {
-            watchdogEnabled = intent?.getBooleanExtra(EXTRA_WATCHDOG, false) == true
-            networkHeartbeatEnabled = intent?.getBooleanExtra(EXTRA_NETWORK_HEARTBEAT, false) == true
             startForeground(NOTIFICATION_ID, buildNotification())
             handler.removeCallbacks(keepAliveTask)
-            handler.postDelayed(keepAliveTask, WATCHDOG_INTERVAL_MS)
+            // 没有启用任何周期性动作时不要启动轮询，避免空转唤醒。
+            if (watchdogEnabled || networkHeartbeatEnabled) {
+                handler.postDelayed(keepAliveTask, WATCHDOG_INTERVAL_MS)
+            }
             START_STICKY
         }.onFailure {
             HLog.e("$TAG 启动前台保活服务失败: ${it.message}", it)
+            // 服务已被 startForegroundService 拉起，却没有成功进入前台状态：
+            // 系统会在超时后抛 ForegroundServiceDidNotStartInTimeException 杀掉进程。
+            // 主动收尾，避免把模块进程一起带走。
+            runCatching {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }.getOrDefault(START_NOT_STICKY)
     }
 
@@ -76,25 +120,34 @@ class WeChatKeepAliveService : Service() {
         private const val CHANNEL_ID = "hchat_wechat_keep_alive"
         private const val NOTIFICATION_ID = 520134
         private const val WATCHDOG_INTERVAL_MS = 60_000L
+        private const val IDLE_INTERVAL_MS = 5 * 60_000L
         private const val EXTRA_WATCHDOG = "h.Hchat.extra.WATCHDOG"
         private const val EXTRA_NETWORK_HEARTBEAT = "h.Hchat.extra.NETWORK_HEARTBEAT"
 
         fun start(context: Context, watchdog: Boolean, networkHeartbeat: Boolean) {
-            val appContext = context.applicationContext ?: context
-            val intent = Intent(appContext, WeChatKeepAliveService::class.java).apply {
+            // 绝对不能在这里取 getApplicationContext()。
+            // LSPosed 里模块的 package context 没有自己的 Application，
+            // getApplicationContext() 会回落到宿主（微信）的 Application，
+            // 于是 Intent 被解析成 com.tencent.mm/h.Hchat...WeChatKeepAliveService，
+            // 系统直接报 "Unable to start service ... not found"（线上抓到的正是这条），
+            // 保活功能因此一直静默失效。显式用模块包名构造组件，绕开这条回落。
+            val intent = Intent().apply {
+                setClassName(BuildConfig.APPLICATION_ID, WeChatKeepAliveService::class.java.name)
                 putExtra(EXTRA_WATCHDOG, watchdog)
                 putExtra(EXTRA_NETWORK_HEARTBEAT, networkHeartbeat)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                appContext.startForegroundService(intent)
+                context.startForegroundService(intent)
             } else {
-                appContext.startService(intent)
+                context.startService(intent)
             }
         }
 
         fun stop(context: Context) {
-            val appContext = context.applicationContext ?: context
-            appContext.stopService(Intent(appContext, WeChatKeepAliveService::class.java))
+            val intent = Intent().apply {
+                setClassName(BuildConfig.APPLICATION_ID, WeChatKeepAliveService::class.java.name)
+            }
+            context.stopService(intent)
         }
     }
 }

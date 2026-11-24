@@ -43,7 +43,7 @@ public class DexFinder {
     private static final String CACHE_COMPLETE = "cache.complete";
     private static final String CACHE_KEY = "cache.key";
     private static final String CACHE_SNAPSHOT_VERSION_KEY = "cache.snapshot.version";
-    private static final String CACHE_SNAPSHOT_VERSION = "2";
+    private static final String CACHE_SNAPSHOT_VERSION = "3";
     private static final String SEND_TEXT_LOCATOR_VERSION_KEY = "send.text.locator.version";
     private static final String SEND_TEXT_LOCATOR_VERSION = "1";
     private static final String CACHE_SEND_TEXT_LOCATOR_RESOLVED = "locator.send.text.resolved";
@@ -63,8 +63,8 @@ public class DexFinder {
     private final ClassLoader classLoader;
     private final SharedPreferences cachePrefs;
     private final String runtimeCacheKey;
-    private boolean resolvedAll;
-    private boolean cacheLoadAttempted;
+    private volatile boolean resolvedAll;
+    private volatile boolean cacheLoadAttempted;
     private boolean cacheDescriptorInvalid;
 
     // AddMsg 处理类
@@ -149,6 +149,13 @@ public class DexFinder {
     public Method localSystemMessageMethod;
     public Method localMessageInsertMethod;
     public Method localMessageCreateTimeMethod;
+    // 本地消息 API 已经完整扫过几轮。
+    // 用来避免「createTime 方法确实定位不到」的机型在每次撤回时都重跑一遍全量 DexKit 扫描。
+    // 不设成一次性开关：hook 安装早期就会调用一次（那时 DexKit 可能还没预热好），
+    // 一旦失败就把后续真正有效的解析永久挡住，撤回提示会整进程失效。
+    private final java.util.concurrent.atomic.AtomicInteger localMessageApiResolveAttempts =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static final int MAX_LOCAL_MESSAGE_RESOLVE_ATTEMPTS = 3;
     // 视频发送高层入口
     public Method sendVideoMethod;
     public Class<?> sendVideoTaskClass;
@@ -1340,7 +1347,10 @@ public class DexFinder {
             if (msgDescLocatorResolved) return;
             if (!msgDescTextMethods.isEmpty()) {
                 msgDescLocatorResolved = true;
-                saveCache();
+                // 全量解析还没跑完时不能落盘：saveCache 是整表覆盖，此刻其它字段
+                // 大多还是空的，写下去会留下"版本号匹配但内容残缺"的缓存。
+                // 交给 resolveAll 收尾时统一保存（它跑完会把这里的列表一起写入）。
+                if (resolvedAll) saveCache();
                 return;
             }
             // 跨版本通用：微信消息描述文本方法名稳定为 "l"（各版本 xN0.q/r.l），用 "string" 字符串缩小范围后按签名过滤
@@ -1357,7 +1367,7 @@ public class DexFinder {
                 logDetail("消息描述文本兜底方法: " + msgDescTextMethods.size() + " 个");
             }
             msgDescLocatorResolved = true;
-            saveCache();
+            if (resolvedAll) saveCache();
         } catch (Throwable e) {
             h.Hchat.utils.HLog.e(TAG + " resolveMsgDescTextApi 失败: " + e.getMessage(), e);
         }
@@ -2621,6 +2631,15 @@ public class DexFinder {
             sqliteDbWrapperClass = findFirstClassByStrings(
                     "MicroMsg.SqliteDB",
                     "sql is null ");
+            if (sqliteDbWrapperClass == null) {
+                // 类级 AND 匹配在混淆包上不够稳：两个锚点可能落在同一批方法的不同类里。
+                // 用方法锚点反查类，再校验"有 String 首参的库方法"避免误命中日志工具类。
+                sqliteDbWrapperClass = findClassByMethodStrings("MicroMsg.SqliteDB");
+                if (sqliteDbWrapperClass != null) {
+                    logDetail("数据库 wrapper 改用方法锚点反查: "
+                            + sqliteDbWrapperClass.getName());
+                }
+            }
 
             logDetail("数据库API: kernel="
                     + (mmKernelClass != null ? mmKernelClass.getName() : "null")
@@ -2989,9 +3008,23 @@ public class DexFinder {
     }
 
     public void resolveLocalMessageApi() {
-        if (ensureSnapshotLoaded()) return;
+        // 插入能力实际由 localSystemMessageMethod 决定；localMessageCreateTimeMethod 只决定
+        // 提示插入到哪个时间点。只要系统消息方法在，就不必再触发昂贵的全量扫描。
+        if (localSystemMessageMethod != null) {
+            if (localMessageCreateTimeMethod == null) {
+                localMessageCreateTimeMethod =
+                        findLocalMessageCreateTimeMethod(localSystemMessageMethod.getDeclaringClass());
+            }
+            return;
+        }
+        // 不能只凭 ensureSnapshotLoaded() 早退：缓存命中时 resolvedAll 会被置为 true，
+        // 若上一轮解析失败把 null 写进了缓存，这里就会永远早退，
+        // 本地消息 API（撤回提示、系统提示插入）在整个进程生命周期内永久失效，
+        // 且没有任何日志——正是「防撤回保留消息但不显示提示」这类现象的来源。
+        if (localMessageApiResolveAttempts.get() >= MAX_LOCAL_MESSAGE_RESOLVE_ATTEMPTS) return;
+        if (ensureSnapshotLoaded() && localSystemMessageMethod != null) return;
+        localMessageApiResolveAttempts.incrementAndGet();
         try {
-            if (hasLocalMessageApi() && localMessageCreateTimeMethod != null) return;
             int candidateCount = resolveLocalMessageApiBySignature();
             logDetail("本地消息API: insert=" + methodName(localMessageInsertMethod)
                     + " system=" + methodName(localSystemMessageMethod)
@@ -3796,6 +3829,17 @@ public class DexFinder {
             chatPageFragmentEnterMethod = loadMethod("chatPageFragmentEnterMethod");
             chatPageFragmentExitMethod = loadMethod("chatPageFragmentExitMethod");
             chatFooterSendClickMethod = loadMethod("chatFooterSendClickMethod");
+            // sqliteDbWrapperClass 为 null 说明这份快照是"解析失败时落盘"的半成品。
+            // 它一旦被复用，数据库监听、本地消息 API、消息变更通知、脚本入口等
+            // 全部依赖它的功能都会静默失效，而且因为"命中缓存"直接 return、不再重扫，
+            // 表现为装了新版本依然全部功能不生效，且每次日志都显示定位不到。
+            // 只校验这一个字段：coreStorage / configStorage 在个别版本可能确实解析不到，
+            // 把它们也算进完整性会导致每次启动都全量重扫。
+            if (sqliteDbWrapperClass == null) {
+                h.Hchat.utils.HLog.e(TAG + " 缓存缺少数据库 wrapper 类，判定缓存失效并重新全量解析");
+                resetCacheForRuntimeKey();
+                return false;
+            }
             return !cacheDescriptorInvalid;
         } catch (Throwable e) {
             logDetail("读取缓存失败，重新解析: " + e.getMessage());
@@ -4833,7 +4877,15 @@ public class DexFinder {
         return groupSolitairePluginClass != null && groupSolitaireSendMethod != null;
     }
 
-    private void saveCache() {
+    /**
+     * 整表落盘。
+     *
+     * 必须串行：这里是 edit().clear() 后重写全部键，两个线程同时进来会互相覆盖，
+     * 后写者会把"自己那一刻只解析了一半"的字段状态当成完整快照写进去，
+     * 并同时写入匹配的 CACHE_KEY，导致下次启动误判缓存有效 → 字段缺失但不再重扫，
+     * 表现为功能静默失效、或每次启动重新全量扫描（卡顿+耗电）。
+     */
+    private synchronized void saveCache() {
         if (cachePrefs == null || runtimeCacheKey.length() == 0) return;
         try {
             SharedPreferences.Editor editor = cachePrefs.edit().clear();
@@ -4999,7 +5051,10 @@ public class DexFinder {
             editor.putBoolean(LOCATOR_ECS_COMPLETE, ecsGiftLocatorResolved);
             editor.putBoolean(LOCATOR_MSG_DESC_COMPLETE, msgDescLocatorResolved);
             editor.putBoolean(LOCATOR_PROTOBUF_COMPLETE, protobufLocatorResolved);
-            boolean snapshotReady = !cacheDescriptorInvalid;
+            // 关键字段缺失时不要把快照标记成完整：否则失败的解析会被永久固化，
+            // 之后每次启动都命中坏缓存而不再重扫，功能静默失效且无从自愈。
+            // 判定条件必须与 loadCache 完全一致，否则会出现"读不通过但写得进"的来回重扫。
+            boolean snapshotReady = !cacheDescriptorInvalid && sqliteDbWrapperClass != null;
             editor.putString(CACHE_SNAPSHOT_VERSION_KEY,
                     snapshotReady ? CACHE_SNAPSHOT_VERSION : "");
             editor.putBoolean(CACHE_COMPLETE, snapshotReady);
@@ -5033,7 +5088,13 @@ public class DexFinder {
                 if (name.length() == 0) continue;
                 try {
                     Class<?> clazz = KavaReflector.loadClass(name, classLoader);
-                    if (clazz == null) cacheDescriptorInvalid = true;
+                    if (clazz == null) {
+                        // 加载失败只标记缓存失效，不能把 null 塞进列表：
+                        // 下游用 isEmpty() 判断"是否可用"会把 null 当有效项，
+                        // 后续 clazz.getName() 直接 NPE。
+                        cacheDescriptorInvalid = true;
+                        continue;
+                    }
                     if (!result.contains(clazz)) result.add(clazz);
                 } catch (Throwable ignored) { cacheDescriptorInvalid = true; }
             }
@@ -5219,6 +5280,33 @@ public class DexFinder {
                 if (!out.isEmpty()) return;
             } catch (Throwable ignored) {}
         }
+    }
+
+    /**
+     * 用「方法锚点」反查声明类。
+     *
+     * 类级 usingStrings 是 AND 语义，要求同一批字符串都出现在同一个类里；
+     * 混淆后同一个类的日志 TAG 和正文可能被拆到不同类，导致类级匹配为 0，
+     * 但方法级仍能命中。命中后再校验类里确实有数据库形态的方法（首参 String），
+     * 避免把只是打印了同名字符串的工具类当成 wrapper。
+     */
+    private Class<?> findClassByMethodStrings(String... strings) {
+        try {
+            List<MethodData> methods = dexKit.findMethod(mkMethodUsingStrings(strings));
+            for (MethodData md : methods) {
+                try {
+                    Class<?> clazz = KavaReflector.loadClass(md.getClassName(), classLoader);
+                    if (clazz == null) continue;
+                    for (Method method : KavaReflector.declaredMethods(clazz)) {
+                        Class<?>[] params = method.getParameterTypes();
+                        if (params.length >= 2 && params[0] == String.class) return clazz;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     private Class<?> findFirstClassByStrings(String... strings) {
@@ -6170,6 +6258,13 @@ public class DexFinder {
     private void logDetail(String message) {
         if (VERBOSE) {
             XposedBridge.log(TAG + " " + message);
+            return;
+        }
+        // 打开「记录运行日志」时，把定位细节也收进设置页的日志缓冲。
+        // 这些行只在解析阶段输出（约 60 处，不是消息热路径），但定位不到方法时
+        // 它们是唯一能说明"到底找到了什么、缺了哪个"的证据。
+        if (h.Hchat.utils.HLog.isCaptureEnabled()) {
+            h.Hchat.utils.HLog.e(TAG + " " + message);
         }
     }
 

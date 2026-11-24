@@ -12,6 +12,7 @@ import h.Hchat.hooks.core.DexInstallScheduler
 import h.Hchat.hooks.core.FeatureContext
 import h.Hchat.hooks.core.HookRegistry
 import h.Hchat.preferences.HchatStorage
+import h.Hchat.utils.DateFormatCache
 import h.Hchat.utils.HLog
 import h.Hchat.utils.KavaReflector
 import org.luckypray.dexkit.query.FindMethod
@@ -83,11 +84,43 @@ private class ChatTimeStyleRuntime(
     private val unsupportedTimeHolders = ConcurrentHashMap.newKeySet<Class<*>>()
     private val bindings = Collections.synchronizedMap(WeakHashMap<TextView, BoundTime>())
     private val bindStates = ThreadLocal<ArrayDeque<BindState>>()
+
+    /**
+     * 开关 / 模式 / 时间格式的缓存。
+     *
+     * 这三个值原来在**每个列表项每次 bind** 时都要走一遍
+     * `SharedPreferences.getBoolean/getString`（内部有锁 + HashMap 查找）
+     * 外加 `normalizeMode` 的字符串归一化。滚动时按一屏 10 个条目、每个条目
+     * 进出复用算，一秒钟就是上百次多余调用，直接吃主线程预算。
+     *
+     * 配置变动由 [preferenceListener] 负责失效，语义不变。
+     *
+     * 声明放在 [preferenceListener] 之前：虽然 lambda 是延迟执行的，
+     * 但这样能保证任何初始化顺序下读到的都是已初始化的字段。
+     */
+    @Volatile private var enabledStateCache: Boolean? = null
+    @Volatile private var modeStateCache: String? = null
+
+    /**
+     * 时间格式 pattern 的缓存。
+     *
+     * 聊天列表每渲染一个条目都会调 [formatTime]，原实现每次都从
+     * SharedPreferences 读一次字符串再 new 一个 SimpleDateFormat。
+     * 滚动时这是一屏几十次的对象分配 + 构造开销，直接体现在掉帧上。
+     * pattern 在 [preferenceListener] 里失效，用户改设置后仍然即时生效。
+     */
+    @Volatile private var patternCache: String? = null
+
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == ChatTimeStyleSettings.KEY_ENABLE ||
             key == ChatTimeStyleSettings.KEY_MODE ||
             key == ChatTimeStyleSettings.KEY_TIME_FORMAT
         ) {
+            // 配置变了，三个缓存全部失效；下面的 isEnabled()/currentMode()
+            // 会读到最新值并重新填充缓存。
+            patternCache = null
+            enabledStateCache = null
+            modeStateCache = null
             if (!isEnabled() || currentMode() == ChatTimeStyleSettings.MODE_ORIGINAL) {
                 restoreAndClearAttachedTimes()
             } else {
@@ -279,26 +312,42 @@ private class ChatTimeStyleRuntime(
     private fun isCurrentBinding(view: TextView, bound: BoundTime): Boolean =
         synchronized(bindings) { bindings[view] === bound }
 
-    private fun isEnabled(): Boolean = prefs.getBoolean(
-        ChatTimeStyleSettings.KEY_ENABLE,
-        ChatTimeStyleSettings.DEFAULT_ENABLE
-    )
+    private fun isEnabled(): Boolean {
+        enabledStateCache?.let { return it }
+        val value = prefs.getBoolean(
+            ChatTimeStyleSettings.KEY_ENABLE,
+            ChatTimeStyleSettings.DEFAULT_ENABLE
+        )
+        enabledStateCache = value
+        return value
+    }
 
-    private fun currentMode(): String = ChatTimeStyleSettings.normalizeMode(
-        prefs.getString(ChatTimeStyleSettings.KEY_MODE, ChatTimeStyleSettings.DEFAULT_MODE)
-    )
+    private fun currentMode(): String {
+        modeStateCache?.let { return it }
+        val value = ChatTimeStyleSettings.normalizeMode(
+            prefs.getString(ChatTimeStyleSettings.KEY_MODE, ChatTimeStyleSettings.DEFAULT_MODE)
+        )
+        modeStateCache = value
+        return value
+    }
 
     private fun formatTime(timestamp: Long): String {
-        val pattern = prefs.getString(
+        // 走带 ThreadLocal 缓存的 formatter，避免每个条目都构造 SimpleDateFormat。
+        return DateFormatCache.format(
+            timestamp,
+            timePattern(),
+            ChatTimeStyleSettings.DEFAULT_TIME_FORMAT
+        )
+    }
+
+    private fun timePattern(): String {
+        patternCache?.let { return it }
+        val value = prefs.getString(
             ChatTimeStyleSettings.KEY_TIME_FORMAT,
             ChatTimeStyleSettings.DEFAULT_TIME_FORMAT
         ).orEmpty().ifBlank { ChatTimeStyleSettings.DEFAULT_TIME_FORMAT }
-        return runCatching {
-            SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestamp))
-        }.getOrElse {
-            SimpleDateFormat(ChatTimeStyleSettings.DEFAULT_TIME_FORMAT, Locale.getDefault())
-                .format(Date(timestamp))
-        }
+        patternCache = value
+        return value
     }
 
     private fun locateBindMethod(): Method? {

@@ -141,15 +141,29 @@ private class InputHintRuntime(
 
     private fun bindFooter(footer: Any?) {
         if (!active || footer == null) return
-        val input = ScriptSendButtonHook.findInputView(footer)
-        if (input != null) {
-            bindInput(input)
-            postToInput(input) { bindInput(input) }
+        // 这个回调挂在 ChatFooter.onAttachedToWindow 上，正处于 View 树 attach 期间。
+        // 原来在这里直接做全量反射扫描（遍历所有字段 + 每个字段类型沿继承链找方法），
+        // 一旦耗时就会顶住输入分发 —— 线上 ANR 报告就是 "Waited 8001ms for MotionEvent"。
+        // 现在只做一次纯缓存查询，未命中就把解析推到下一个消息，让 attach 先完成。
+        val cached = ScriptSendButtonHook.findInputViewCached(footer)
+        if (cached != null) {
+            bindInput(cached)
+            postToInput(cached) { bindInput(cached) }
             return
         }
-        (footer as? View)?.post {
-            ScriptSendButtonHook.findInputView(footer)?.let(::bindInput)
+        val view = footer as? View
+        if (view != null) {
+            view.post { resolveAndBind(footer) }
+        } else {
+            mainHandler.post { resolveAndBind(footer) }
         }
+    }
+
+    private fun resolveAndBind(footer: Any?) {
+        if (!active || footer == null) return
+        val input = ScriptSendButtonHook.findInputView(footer) ?: return
+        bindInput(input)
+        postToInput(input) { bindInput(input) }
     }
 
     private fun bindInput(input: Any) {

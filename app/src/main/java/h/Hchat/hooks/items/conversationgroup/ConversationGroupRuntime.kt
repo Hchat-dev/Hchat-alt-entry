@@ -273,7 +273,7 @@ object ConversationGroupRuntime {
         val nativeGroupMarkReadInstalled = hook(nativeGroupMarkRead, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (isVirtualTalker(param.args?.getOrNull(0) as? String)) {
-                    param.result = false
+                    param.setResult(false)
                 }
             }
         })
@@ -295,7 +295,7 @@ object ConversationGroupRuntime {
                     if (isVirtualTalker(nativeGroupPageParent.get()) &&
                         param.args?.getOrNull(0) == NATIVE_GROUP_PLACEHOLDER
                     ) {
-                        param.result = null
+                        param.setResult(null)
                     }
                 }
             })
@@ -505,7 +505,7 @@ object ConversationGroupRuntime {
                 val item = runCatching { adapter.getItemAtPosition(position) }.getOrNull() ?: return
                 val talker = virtualTalkerFromItem(item) ?: return
                 val activity = findActivity(view.context) ?: return
-                param.result = null
+                param.setResult(null)
                 main.post {
                     val groupId = ConversationGroupStore.load(activity)
                         .firstOrNull { virtualTalker(it.id) == talker }
@@ -547,7 +547,7 @@ object ConversationGroupRuntime {
                 if (!isVirtualTalker(parent)) return
 
                 if (WeChatApis.conversations()?.deleteConversation(talker) == true) {
-                    param.result = null
+                    param.setResult(null)
                 } else {
                     HLog.e(
                         "$TAG 隐藏分组会话失败，继续执行微信原逻辑: " +
@@ -596,7 +596,7 @@ object ConversationGroupRuntime {
                 val item = param.args?.getOrNull(0) as? MenuItem ?: return
                 if (item.itemId != MENU_ITEM_ID) return
                 val target = menuBindings.remove(item) ?: return
-                param.result = null
+                param.setResult(null)
                 main.post {
                     val activity = target.activity.get() ?: return@post
                     if (!activity.isFinishing && !activity.isDestroyed) {
@@ -671,7 +671,7 @@ object ConversationGroupRuntime {
                 val item = runCatching { adapter.getItemAtPosition(position) }.getOrNull() ?: return
                 val talker = conversationTalkerFromItem(item)
                 val activity = findActivity(view.context) ?: return
-                param.result = null
+                param.setResult(null)
                 if (talker.isNullOrBlank()) {
                     HLog.e("$TAG 微信原生分组列表无法解析会话: item=${item.javaClass.name}")
                     return
@@ -734,7 +734,7 @@ object ConversationGroupRuntime {
                     ?: return
                 val talker = activity.intent?.getStringExtra(CONTACT_USER_EXTRA)
                     ?.takeIf(::isVirtualTalker) ?: return
-                param.result = talker
+                param.setResult(talker)
             }
         })
         val lifecycleInstalled = hook(lifecycle, object : XC_MethodHook() {

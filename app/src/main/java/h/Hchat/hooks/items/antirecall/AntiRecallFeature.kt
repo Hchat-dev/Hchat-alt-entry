@@ -13,6 +13,8 @@ import h.Hchat.hooks.core.DexInstallScheduler
 import h.Hchat.hooks.core.FeatureContext
 import h.Hchat.hooks.core.HookRegistry
 import h.Hchat.preferences.HchatStorage
+import h.Hchat.preferences.HotConfig
+import h.Hchat.utils.DateFormatCache
 import h.Hchat.utils.KavaReflector
 import java.lang.reflect.Method
 import java.text.SimpleDateFormat
@@ -34,6 +36,22 @@ class AntiRecallFeature : BaseFeature() {
     @Volatile private var msgProcessingHookInstalled = false
     @Volatile private var legacyCleanupHookInstalled = false
 
+    /**
+     * 三个开关的热路径缓存。
+     *
+     * 原实现每次都在消息回调里现读 SharedPreferences：拼两次字符串 + 一次
+     * ConcurrentHashMap 查表 + FastKV 取锁。撤回消息可能成批到达（一次撤回多条、
+     * 群里连续撤回），单条就要走 2~3 次配置读取，属于典型的"每次调用都走一遍"。
+     * HotConfig 把读路径压成一次 volatile 读，拨开关最多 3 秒生效。
+     */
+    @Volatile private var enabledFlag: () -> Boolean = { AntiRecallSettings.DEFAULT_ENABLE }
+    @Volatile private var keepSelfRecallFlag: () -> Boolean = {
+        AntiRecallSettings.DEFAULT_KEEP_SELF_RECALL
+    }
+    @Volatile private var showNoticeFlag: () -> Boolean = {
+        AntiRecallSettings.DEFAULT_SHOW_NOTICE
+    }
+
     override fun featureId(): String = ID
 
     override fun name(): String = "防撤回"
@@ -44,6 +62,27 @@ class AntiRecallFeature : BaseFeature() {
 
     override fun onFeatureInstall(context: FeatureContext) {
         methodCachePrefs = DexMethodCache.prefs(context.hostContext(), "Hchat_anti_recall_method_cache")
+        val prefs = HchatStorage.preferences(context.hostContext(), AntiRecallSettings.PREFS_NAME)
+        enabledFlag = HotConfig.flag(ID, AntiRecallSettings.KEY_ENABLE, AntiRecallSettings.DEFAULT_ENABLE) {
+            prefs.getBoolean(AntiRecallSettings.KEY_ENABLE, AntiRecallSettings.DEFAULT_ENABLE)
+        }
+        keepSelfRecallFlag = HotConfig.flag(
+            ID,
+            AntiRecallSettings.KEY_KEEP_SELF_RECALL,
+            AntiRecallSettings.DEFAULT_KEEP_SELF_RECALL
+        ) {
+            prefs.getBoolean(
+                AntiRecallSettings.KEY_KEEP_SELF_RECALL,
+                AntiRecallSettings.DEFAULT_KEEP_SELF_RECALL
+            )
+        }
+        showNoticeFlag = HotConfig.flag(
+            ID,
+            AntiRecallSettings.KEY_SHOW_NOTICE,
+            AntiRecallSettings.DEFAULT_SHOW_NOTICE
+        ) {
+            prefs.getBoolean(AntiRecallSettings.KEY_SHOW_NOTICE, AntiRecallSettings.DEFAULT_SHOW_NOTICE)
+        }
         installMessageCache()
         installSelfRecallUpdateHook(context)
         scheduleDexHooks(context)
@@ -550,9 +589,14 @@ class AntiRecallFeature : BaseFeature() {
         recallTime: Long,
         selfRecall: Boolean
     ) {
-        if (talker.isBlank() || svrId <= 0L) {
-            h.Hchat.utils.HLog.e("$TAG 插入提示失败: talker/newmsgid为空 talker=$talker newmsgid=$svrId")
+        if (talker.isBlank()) {
+            h.Hchat.utils.HLog.e("$TAG 插入提示失败: talker 为空")
             return
+        }
+        // svrId 只用于定位原消息和日志，为 0 时仍可插入（时间走兜底）。
+        // 原实现直接 return，会让部分机型的撤回事件静默丢掉提示。
+        if (svrId <= 0L) {
+            h.Hchat.utils.HLog.e("$TAG 撤回事件 newmsgid 为 0，改用兜底时间插入 talker=$talker")
         }
         val localMessages = WeChatApis.localMessages()
         if (localMessages == null) {
@@ -560,18 +604,25 @@ class AntiRecallFeature : BaseFeature() {
             return
         }
         localMessages.ensureReady()
-        val targetCreateTime = resolveRecalledCreateTime(svrId, recalledInfo)
+        val resolvedCreateTime = resolveRecalledCreateTime(svrId, recalledInfo)
+        // 定位不到原消息时间时不要直接放弃提示——那会让「显示撤回提示」看起来完全没生效。
+        // 退回撤回事件时间（再不行用当前时间），提示会落在会话末尾附近，但用户能看到。
+        val targetCreateTime = when {
+            resolvedCreateTime > 0L -> resolvedCreateTime
+            recallTime > 0L -> recallTime
+            else -> System.currentTimeMillis()
+        }
+        if (resolvedCreateTime <= 0L) {
+            h.Hchat.utils.HLog.e(
+                "$TAG 未定位原消息时间，提示改用兜底时间 talker=$talker id=$svrId " +
+                    "origin=${recalledInfo?.originSvrId ?: 0L} new=${recalledInfo?.newMsgId ?: 0L} " +
+                    "fallback=$targetCreateTime"
+            )
+        }
         val notice = if (selfRecall) {
             AntiRecallSettings.SELF_NOTICE_TEXT
         } else {
             noticeText(context, talker, recalledInfo, targetCreateTime, recallTime)
-        }
-        if (targetCreateTime <= 0L) {
-            h.Hchat.utils.HLog.e(
-                "$TAG 插入提示失败: 未定位原消息时间 talker=$talker id=$svrId " +
-                    "origin=${recalledInfo?.originSvrId ?: 0L} new=${recalledInfo?.newMsgId ?: 0L}"
-            )
-            return
         }
         val result = localMessages.insertSystemMessageAt(talker, notice, targetCreateTime + 1L)
         if (result <= 0L) {
@@ -680,12 +731,12 @@ class AntiRecallFeature : BaseFeature() {
 
     private fun formatNoticeTime(time: Long, pattern: String): String {
         if (time <= 0L) return ""
-        return runCatching {
-            SimpleDateFormat(pattern, Locale.getDefault()).format(Date(time))
-        }.getOrElse {
-            SimpleDateFormat(AntiRecallSettings.DEFAULT_NOTICE_TIME_FORMAT, Locale.getDefault())
-                .format(Date(time))
-        }
+        // 每条撤回消息都会走到这里，走缓存的 formatter，避免重复构造 SimpleDateFormat。
+        return DateFormatCache.format(
+            time,
+            pattern,
+            AntiRecallSettings.DEFAULT_NOTICE_TIME_FORMAT
+        )
     }
 
     private fun normalizeNoticeTemplate(template: String): String {
@@ -1123,20 +1174,13 @@ class AntiRecallFeature : BaseFeature() {
             types[5] == String::class.java
     }
 
-    private fun isAntiRecallEnabled(context: FeatureContext): Boolean {
-        return HchatStorage.preferences(context.hostContext(), AntiRecallSettings.PREFS_NAME)
-            .getBoolean(AntiRecallSettings.KEY_ENABLE, AntiRecallSettings.DEFAULT_ENABLE)
-    }
+    // 三个开关都走 HotConfig 缓存：调用点的语义不变，但读路径从
+    // 「拼串 + 查表 + FastKV 取锁」压成一次 volatile 读。
+    private fun isAntiRecallEnabled(context: FeatureContext): Boolean = enabledFlag()
 
-    private fun keepSelfRecallEnabled(context: FeatureContext): Boolean {
-        return HchatStorage.preferences(context.hostContext(), AntiRecallSettings.PREFS_NAME)
-            .getBoolean(AntiRecallSettings.KEY_KEEP_SELF_RECALL, AntiRecallSettings.DEFAULT_KEEP_SELF_RECALL)
-    }
+    private fun keepSelfRecallEnabled(context: FeatureContext): Boolean = keepSelfRecallFlag()
 
-    private fun showNoticeEnabled(context: FeatureContext): Boolean {
-        return HchatStorage.preferences(context.hostContext(), AntiRecallSettings.PREFS_NAME)
-            .getBoolean(AntiRecallSettings.KEY_SHOW_NOTICE, AntiRecallSettings.DEFAULT_SHOW_NOTICE)
-    }
+    private fun showNoticeEnabled(context: FeatureContext): Boolean = showNoticeFlag()
 
     private fun short(value: String, max: Int = 120): String {
         val raw = value.replace('\n', ' ')

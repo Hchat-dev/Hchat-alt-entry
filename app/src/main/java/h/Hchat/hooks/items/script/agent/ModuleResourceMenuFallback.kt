@@ -62,7 +62,7 @@ object ModuleResourceMenuFallback {
                             else -> return
                         }
                         closeActionMode(menu)
-                        param.result = true
+                        param.setResult(true)
                     }
                 },
             )
@@ -134,7 +134,7 @@ object ModuleResourceMenuFallback {
                                 label,
                             )
                         }.getOrNull() ?: return
-                        param.result = item
+                        param.setResult(item)
                     }
                 },
             )

@@ -204,7 +204,7 @@ private object FakeLocationProcessHooker {
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!FakeLocationFeature.isEnabled(context)) return
-                    param.result = value()
+                    param.setResult(value())
                 }
             })
         }.onFailure {

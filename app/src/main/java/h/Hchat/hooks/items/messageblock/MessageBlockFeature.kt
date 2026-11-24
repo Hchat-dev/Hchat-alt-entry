@@ -60,7 +60,7 @@ class MessageBlockFeature : BaseFeature() {
                                     return
                                 }
                                 postBlockedMessage(context, parsed)
-                                param.result = null
+                                param.setResult(null)
                                 return
                             }
                         }

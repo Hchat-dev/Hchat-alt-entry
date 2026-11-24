@@ -81,7 +81,7 @@ internal class CallMediaLimitHooker(
                 HookRegistry.get().hook(method, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (!isEnabled()) return
-                        param.result = false
+                        param.setResult(false)
                     }
                 })
             }

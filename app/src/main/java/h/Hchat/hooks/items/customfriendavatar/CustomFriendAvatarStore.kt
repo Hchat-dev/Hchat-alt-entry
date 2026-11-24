@@ -46,6 +46,30 @@ object CustomFriendAvatarStore {
         return id.takeIf(String::isNotEmpty)?.let { avatarFile(context, it).absolutePath }.orEmpty()
     }
 
+    /**
+     * 只查内存缓存，**不触碰文件系统**。
+     *
+     * 头像绘制发生在 Drawable.draw()，每帧每个可见头像都会调用。走 [loadBitmap]
+     * 每次要做 4 次 stat syscall（isFile / length / lastModified ×2）+ 一把全局锁，
+     * 一屏 10 个头像按 60fps 算就是每秒 2400 次 syscall，直接吃掉绘制时间。
+     *
+     * 这里只做一次内存查表；缓存失效由 [saveFromUri] / [removeCached] 主动完成。
+     */
+    @JvmStatic
+    fun cachedBitmap(wxid: String?): Bitmap? {
+        val id = wxid?.trim().orEmpty()
+        if (id.isEmpty()) return null
+        synchronized(cache) {
+            val entry = cache[id] ?: return null
+            if (entry.bitmap.isRecycled) {
+                cache.remove(id)
+                cacheBytes -= entry.bytes
+                return null
+            }
+            return entry.bitmap
+        }
+    }
+
     @JvmStatic
     fun loadBitmap(context: Context, wxid: String?): Bitmap? {
         val id = wxid?.trim().orEmpty()

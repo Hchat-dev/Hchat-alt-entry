@@ -74,7 +74,7 @@ private class PatBlockHooker(
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (isEnabled()) {
-                        param.result = true
+                        param.setResult(true)
                     }
                 }
             })

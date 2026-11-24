@@ -63,7 +63,6 @@ public class WechatApiFeature implements Feature {
         WeChatMessageApi messageApi = new WeChatMessageApi(
                 context.dexFinder(), dispatcher, accountApi, contactApi, messageStoreApi, context.eventBus(), this::log);
         WeChatLocalMessageApi localMessageApi = new WeChatLocalMessageApi(context.dexFinder(), this::log);
-        localMessageApi.installCreateTimeHook();
         WeChatConversationApi conversationApi = new WeChatConversationApi(
                 databaseApi, contactApi, notifyApi, context.dexFinder(), this::log);
         WeChatUserApi userApi = new WeChatUserApi(accountApi, contactApi, this::log);
@@ -106,6 +105,19 @@ public class WechatApiFeature implements Feature {
         WeChatSnsApi snsApi = new WeChatSnsApi(
                 context.hostContext(), context.dexFinder(), context.hostClassLoader(),
                 context.dexKitBridge(), networkApi, accountApi, contactApi, context, this::log);
+        // 先发布静态引用，再装 hook。
+        // 原实现把 init 放在所有 hook 安装之后：只要中间任何一处 hook/构造函数抛异常，
+        // init 就永远不执行，整个进程里 WeChatApis 的所有 getter 全部返回 null，
+        // 依赖公共 API 的功能集体静默失效，日志里只有一条"功能安装失败"。
+        WeChatApis.init(messageApi, databaseApi, accountApi, contactApi,
+                messageStoreApi, conversationApi, notifyApi, configApi, networkApi, userApi,
+                chatroomApi, storageApi, messageParseApi, messageEventApi,
+                localMessageApi, uiApi, mediaApi, permissionApi, databaseListenerApi,
+                currentActivityApi, activityStartApi, messageChangeApi,
+                conversationChangeApi, contactChangeApi, chatroomChangeApi,
+                lifecycleApi, diagnosticsApi, taskApi, messageObserveApi, chatPageApi, versionApi,
+                transferApi, verifyUserApi, snsApi);
+        localMessageApi.installCreateTimeHook();
         networkApi.installNetworkHook(context.dexFinder());
         messageEventApi.installAddMsgHook();
         installApiHook("databaseChanges", databaseListenerApi::install);
@@ -118,14 +130,6 @@ public class WechatApiFeature implements Feature {
         installApiHook("lifecycle", lifecycleApi::install);
         installApiHook("messageObserve", messageObserveApi::install);
         installApiHook("chatPage", chatPageApi::install);
-        WeChatApis.init(messageApi, databaseApi, accountApi, contactApi,
-                messageStoreApi, conversationApi, notifyApi, configApi, networkApi, userApi,
-                chatroomApi, storageApi, messageParseApi, messageEventApi,
-                localMessageApi, uiApi, mediaApi, permissionApi, databaseListenerApi,
-                currentActivityApi, activityStartApi, messageChangeApi,
-                conversationChangeApi, contactChangeApi, chatroomChangeApi,
-                lifecycleApi, diagnosticsApi, taskApi, messageObserveApi, chatPageApi, versionApi,
-                transferApi, verifyUserApi, snsApi);
         DexInstallScheduler.scheduleTask("wechat_api:warmup", "微信公共API预热",
                 DexInstallScheduler.Stage.BRIDGE, 1000, () -> {
             try {

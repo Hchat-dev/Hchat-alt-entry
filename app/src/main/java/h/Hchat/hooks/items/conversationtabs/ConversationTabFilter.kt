@@ -3,8 +3,9 @@ package h.Hchat.hooks.items.conversationtabs
 /** SQL is compiled on selection, never while binding or scrolling conversation rows. */
 internal class ConversationTabFilter(val tab: ConversationTab) {
     val active = tab.kind != ConversationTabKind.ALL
-    private val containers = setOf("officialaccounts", "service_officialaccounts", "photoaccounts",
-        "message_fold", "appbrand_notify_message", "conversationboxservice")
+    private val officialContainers = setOf("officialaccounts", "service_officialaccounts", "photoaccounts")
+    private val containers = officialContainers + setOf("message_fold",
+        "appbrand_notify_message", "conversationboxservice")
     private val system = containers + setOf("fmessage", "tmessage", "qqmail", "weixin",
         "floatbottle", "medianote", "newsapp", "masssend", "feedsapp", "blogapp")
     private fun literal(value: String) = "'" + value.replace("'", "''") + "'"
@@ -13,7 +14,11 @@ internal class ConversationTabFilter(val tab: ConversationTab) {
     private fun predicateFor(qualifier: String): String {
         val user = "$qualifier.username"
         val group = "($user LIKE '%@chatroom' OR $user LIKE '%@im.chatroom')"
-        val official = "($user GLOB 'gh_*' OR EXISTS (SELECT 1 FROM rcontact AS hchat_tab_contact " +
+        // 首页上的「订阅号消息 / 服务号」是**聚合容器行**（username 分别为 officialaccounts /
+        // service_officialaccounts / photoaccounts），单个 gh_ 会话被折叠在容器下面。
+        // 因此公众号分组必须同时承认容器行，否则分组永远是空的。
+        val official = "($user GLOB 'gh_*' OR $user IN (${inList(officialContainers)}) OR " +
+            "EXISTS (SELECT 1 FROM rcontact AS hchat_tab_contact " +
             "WHERE hchat_tab_contact.username=$user AND hchat_tab_contact.verifyFlag!=0))"
         return when (tab.kind) {
             ConversationTabKind.ALL -> "1"
@@ -23,17 +28,25 @@ internal class ConversationTabFilter(val tab: ConversationTab) {
             ConversationTabKind.OFFICIAL -> official
             ConversationTabKind.CUSTOM -> if (tab.conversationIds.isEmpty()) "0" else
                 "$user IN (${inList(tab.conversationIds)})"
-        }.let { if (!active) it else "($it) AND $user NOT GLOB 'wxid_hchat_group_*' " +
-            "AND $user NOT IN (${inList(containers)})" }
+        }.let {
+            if (!active) it else if (tab.kind == ConversationTabKind.OFFICIAL) {
+                // 公众号分组自己就是要这些容器行，不能再排除。
+                "($it) AND $user NOT GLOB 'wxid_hchat_group_*'"
+            } else {
+                "($it) AND $user NOT GLOB 'wxid_hchat_group_*' AND $user NOT IN (${inList(containers)})"
+            }
+        }
     }
 
     val predicate: String = predicateFor("rconversation")
 
     fun accepts(username: String, unread: Int, mutedUnread: Int, verifyFlag: Int): Boolean {
         if (!active) return true
-        if (username.startsWith("wxid_hchat_group_") || username in containers) return false
+        if (username.startsWith("wxid_hchat_group_")) return false
+        // 官方账号聚合容器在原生首页是独立一行，公众号分组要保留它，其余分组一律排除。
+        if (username in containers && tab.kind != ConversationTabKind.OFFICIAL) return false
         val isGroup = username.endsWith("@chatroom") || username.endsWith("@im.chatroom")
-        val isOfficial = username.startsWith("gh_") || verifyFlag != 0
+        val isOfficial = username.startsWith("gh_") || username in officialContainers || verifyFlag != 0
         return when (tab.kind) {
             ConversationTabKind.ALL -> true
             ConversationTabKind.UNREAD -> unread > 0 || mutedUnread > 0
@@ -44,15 +57,23 @@ internal class ConversationTabFilter(val tab: ConversationTab) {
         }
     }
 
-    /** Folded conversations are projected as leaves; stored parentRef is never modified. */
+    /**
+     * Folded conversations are projected as leaves; stored parentRef is never modified.
+     *
+     * 只展开 Hchat 自己的分组容器。officialaccounts / service_officialaccounts / photoaccounts
+     * 是微信原生的"订阅号消息 / 服务号"折叠入口，一旦在这里被提升成根会话，首页会被几十个
+     * gh_ 会话刷满，原生列表结构被破坏。公众号分组保留那一条容器行即可。
+     */
     private fun parent(reference: String): String =
-        "(CASE WHEN $reference IN ('officialaccounts','service_officialaccounts','photoaccounts','message_fold') " +
-            "OR $reference GLOB 'wxid_hchat_group_*' OR $reference GLOB 'hchat_conv_group:*' " +
+        "(CASE WHEN $reference GLOB 'wxid_hchat_group_*' OR $reference GLOB 'hchat_conv_group:*' " +
             "THEN NULL ELSE $reference END)"
 
     fun rootWhere(original: String): String = if (!active) original else {
         val qualifier = expressionQualifier(original) ?: "rconversation"
-        "(${expandParents(original, qualifier)}) AND (${predicateFor(qualifier)})"
+        val existing = expandParents(original, qualifier)
+        // 原生 WHERE 片段可能为空：直接拼 "() AND (...)" 会生成非法 SQL。
+        if (existing.isBlank()) "(${predicateFor(qualifier)})"
+        else "($existing) AND (${predicateFor(qualifier)})"
     }
 
     /** Rewrites only a single native rconversation SELECT, preserving flags, bind args and LIMIT. */

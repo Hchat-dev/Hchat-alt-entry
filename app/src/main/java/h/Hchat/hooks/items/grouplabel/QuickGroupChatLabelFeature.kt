@@ -149,7 +149,7 @@ private class QuickGroupChatLabelRuntime(
                 val item = param.args?.getOrNull(0) as? MenuItem ?: return
                 if (item.itemId != MENU_ITEM_ID) return
                 val target = bindings.remove(item) ?: return
-                param.result = null
+                param.setResult(null)
                 main.post { showLabelActions(target) }
             }
         })

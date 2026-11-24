@@ -47,6 +47,15 @@ import kotlin.random.Random
 
 object AutoReplyRuntime {
     private const val TAG = "[Hchat:AutoReply]"
+
+    /**
+     * 发送间隙人味化（防封轮 · 时序抖动）。
+     * 固定 300ms 的间隔是显眼的机器指纹——真人手速不可能恒定。
+     * 叠加 0~500ms 均匀抖动后均值仍约 550ms，体感无差异，但时序指纹被打散。
+     */
+    private const val SEND_GAP_BASE_MS = 300L
+    private const val SEND_GAP_JITTER_MS = 500L
+    private fun sendGapMs(): Long = SEND_GAP_BASE_MS + Random.nextLong(SEND_GAP_JITTER_MS)
     private const val AT_ALL_WXID = "notify@all"
     private const val XIAOZHI_INPUT_SAMPLE_RATE = 16000
     private const val XIAOZHI_INPUT_CHANNELS = 1
@@ -54,6 +63,7 @@ object AutoReplyRuntime {
     private const val XIAOZHI_WAKE_TEXT_MAX_LENGTH = 10
     private const val XIAOZHI_VOICE_STOP_GRACE_MS = 800L
     private const val XIAOZHI_SOCKET_IDLE_MS = 90_000L
+    private const val XIAOZHI_CONNECT_SPIN_LIMIT = 4
     private const val XIAOZHI_OPUS_PCM_SAMPLE_RATE = 48000
     private const val XIAOZHI_SILK_SAMPLE_RATE = 24000
     private val executor = Executors.newSingleThreadExecutor { runnable ->
@@ -323,7 +333,7 @@ object AutoReplyRuntime {
             val delay = step.delayMs + if (step.randomDelay) Random.nextLong(0L, 2001L) else 0L
             if (delay > 0) sleep(delay)
             sent = sendStep(context, target, step, message, replyAsQuote) || sent
-            if (index < steps.lastIndex && step.delayMs <= 0L) sleep(300L)
+            if (index < steps.lastIndex && step.delayMs <= 0L) sleep(sendGapMs())
         }
         return sent
     }
@@ -350,7 +360,7 @@ object AutoReplyRuntime {
                             sendText(target, text)
                         }
                         sent = currentSent || sent
-                        if (index < parts.lastIndex) sleep(300L)
+                        if (index < parts.lastIndex) sleep(sendGapMs())
                     }
                     sent
                 }
@@ -426,7 +436,7 @@ object AutoReplyRuntime {
                     if (isXiaozhiVoiceSendable(path) || path.endsWith(".silk", ignoreCase = true)) {
                         val sent = media?.sendVoice(target, path, segment.durationMs.coerceAtLeast(1000)) == true
                         if (sent) sentAny = true
-                        if (index < reply.voiceSegments.lastIndex) sleep(300L)
+                        if (index < reply.voiceSegments.lastIndex) sleep(sendGapMs())
                     }
                 }
             } finally {
@@ -475,7 +485,7 @@ object AutoReplyRuntime {
                 if (media.sendVoice(target, segment.file.absolutePath, segment.durationMs.coerceAtLeast(1000))) {
                     sent = true
                 }
-                if (index < voiceSegments.lastIndex) sleep(300L)
+                if (index < voiceSegments.lastIndex) sleep(sendGapMs())
             }
             sent
         } finally {
@@ -820,6 +830,7 @@ object AutoReplyRuntime {
         mcpEnabledForRequest: Boolean
     ): XiaozhiSocketSession {
         val signature = xiaozhiSocketSignature(config, mcpEnabledForRequest)
+        var spinCount = 0
         while (true) {
             val current = xiaozhiSockets[sessionKey]
             if (current != null && !current.isClosed() && !current.isBusy() && current.signature == signature) {
@@ -843,6 +854,17 @@ object AutoReplyRuntime {
                 current?.close("replaced")
                 next.connect(request)
                 return next
+            }
+            // 多线程同时为同一 sessionKey 建连时可能持续竞争失败；
+            // 无上限自旋会不断 new session + Request。让出一次后重读，
+            // 连续失败几次直接复用现有连接（哪怕它忙），避免死循环。
+            Thread.yield()
+            if (++spinCount >= XIAOZHI_CONNECT_SPIN_LIMIT) {
+                current?.takeIf { !it.isClosed() && it.signature == signature }?.let {
+                    it.touch()
+                    return it
+                }
+                spinCount = 0
             }
         }
     }
@@ -2262,7 +2284,7 @@ object AutoReplyRuntime {
         for (path in splitMulti(value)) {
             val file = File(path)
             if (file.isFile && sender(path)) ok = true
-            sleep(300L)
+            sleep(sendGapMs())
         }
         return ok
     }
@@ -2271,7 +2293,7 @@ object AutoReplyRuntime {
         var ok = false
         for (localId in splitMulti(value)) {
             if (sender(localId)) ok = true
-            sleep(300L)
+            sleep(sendGapMs())
         }
         return ok
     }

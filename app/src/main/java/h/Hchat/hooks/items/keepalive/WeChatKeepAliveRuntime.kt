@@ -6,19 +6,25 @@ import android.os.PowerManager
 import h.Hchat.BuildConfig
 import h.Hchat.preferences.HchatStorage
 import h.Hchat.utils.HLog
+import java.util.concurrent.TimeUnit
 
 object WeChatKeepAliveRuntime {
     private const val TAG = "[Hchat:KeepAlive]"
     private const val WAKE_LOCK_TAG = "Hchat:WeChatKeepAlive"
     private const val WECHAT_PACKAGE = "com.tencent.mm"
     private var wakeLock: PowerManager.WakeLock? = null
+    /** 最近一次成功解析的模块 Context，供 stop() 在调用方没传参时兜底。 */
+    @Volatile private var cachedModuleContext: Context? = null
     @Volatile private var rootWhitelistApplied = false
     @Volatile private var rootAppOpsApplied = false
 
     fun apply(hostContext: Context?, moduleContext: Context? = null) {
         if (hostContext == null) return
         val appContext = hostContext.applicationContext ?: hostContext
-        val serviceContext = (moduleContext ?: resolveModuleContext(appContext))?.let { it.applicationContext ?: it }
+        // 模块 Context 必须原样保留：它的 getApplicationContext() 会回落到宿主（微信）的
+        // Application，一旦替换掉，后续 startService 就会解析成 com.tencent.mm/... 而失败。
+        val serviceContext = moduleContext ?: resolveModuleContext(appContext)
+        if (serviceContext != null) cachedModuleContext = serviceContext
         val prefs = HchatStorage.preferences(appContext, WeChatKeepAliveSettings.PREFS_NAME)
         val enabled = prefs.getBoolean(WeChatKeepAliveSettings.KEY_ENABLE, WeChatKeepAliveSettings.DEFAULT_ENABLE)
         if (!enabled) {
@@ -56,10 +62,13 @@ object WeChatKeepAliveRuntime {
 
     fun stop(moduleContext: Context? = null) {
         releaseWakeLock()
-        val serviceContext = moduleContext?.applicationContext ?: moduleContext
+        // 调用方不传参时不能就此什么都不做——原来会留下"关了开关服务还在跑"。
+        // 用 apply() 缓存下来的模块 Context 兜底。
+        val serviceContext = moduleContext ?: cachedModuleContext
         if (serviceContext != null) {
             runCatching { WeChatKeepAliveService.stop(serviceContext) }
         }
+        cachedModuleContext = null
     }
 
     fun isIgnoringBatteryOptimizations(context: Context?): Boolean {
@@ -74,27 +83,40 @@ object WeChatKeepAliveRuntime {
         if (context == null) return
         if (!enabled) return
         val appContext = context.applicationContext ?: context
-        launchWeChatIfNeeded(appContext)
+        // 这段原来直接跑在 Service 的主线程上：pidof / su 都会 fork 子进程再 waitFor，
+        // 主线程被 fork + wait 占住就是一次 ANR（6.9.3 那份系统 trace 里主线程正好卡在
+        // do_wait，即 wait4 等子进程）。看门狗本来就不需要"立刻"完成，挪到后台线程。
+        runCatching {
+            watchdogExecutor.execute { runCatching { launchWeChatIfNeeded(appContext) } }
+        }.onFailure {
+            HLog.e("$TAG 看门狗调度失败: ${it.message}", it)
+        }
     }
 
     fun heartbeatTick(enabled: Boolean) {
         if (!enabled) return
-        Thread {
-            runCatching {
-                val connection = java.net.URL(HEARTBEAT_URL).openConnection() as java.net.HttpURLConnection
-                connection.connectTimeout = HEARTBEAT_TIMEOUT_MS
-                connection.readTimeout = HEARTBEAT_TIMEOUT_MS
-                connection.useCaches = false
-                connection.requestMethod = "GET"
-                connection.responseCode
-                connection.disconnect()
-            }.onFailure {
-                HLog.e("$TAG 网络心跳失败: ${it.message}")
+        // 复用看门狗的单线程执行器：每 60 秒 new 一个线程既浪费又增加调度开销。
+        // 若队列积压（上一次心跳还没跑完），说明网络很差，本次直接跳过即可。
+        runCatching {
+            watchdogExecutor.execute {
+                var connection: java.net.HttpURLConnection? = null
+                try {
+                    connection = java.net.URL(HEARTBEAT_URL).openConnection() as java.net.HttpURLConnection
+                    connection.connectTimeout = HEARTBEAT_TIMEOUT_MS
+                    connection.readTimeout = HEARTBEAT_TIMEOUT_MS
+                    connection.useCaches = false
+                    connection.requestMethod = "GET"
+                    connection.responseCode
+                } catch (t: Throwable) {
+                    HLog.e("$TAG 网络心跳失败: ${t.message}")
+                } finally {
+                    // 失败路径也要 disconnect：原来异常时 socket 既不入池也不关闭。
+                    runCatching { connection?.disconnect() }
+                }
             }
-        }.apply {
-            name = "Hchat-KeepAlive-Heartbeat"
-            isDaemon = true
-        }.start()
+        }.onFailure {
+            HLog.e("$TAG 网络心跳调度失败: ${it.message}", it)
+        }
     }
 
     private fun acquireWakeLock(context: Context) {
@@ -105,7 +127,9 @@ object WeChatKeepAliveRuntime {
             @Suppress("DEPRECATION")
             val lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
                 setReferenceCounted(false)
-                acquire()
+                // 兜底超时：如果 stop() 因 Context 解析失败等被吞掉而没走到 release，
+                // 无限期持有的 PARTIAL_WAKE_LOCK 会阻止 CPU 深度休眠，直接变成整机耗电。
+                acquire(TimeUnit.HOURS.toMillis(12))
             }
             wakeLock = lock
         }.onFailure {
@@ -167,7 +191,12 @@ object WeChatKeepAliveRuntime {
             val process = ProcessBuilder("su", "-c", command)
                 .redirectErrorStream(true)
                 .start()
-            process.waitFor() == 0
+            // su 可能等 Magisk 授权弹窗，没有超时就会一直挂着这个后台线程。
+            if (!process.waitFor(ROOT_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return@runCatching false
+            }
+            process.exitValue() == 0
         }.getOrDefault(false)
     }
 
@@ -185,13 +214,26 @@ object WeChatKeepAliveRuntime {
 
     private fun isWeChatProcessAlive(): Boolean {
         return runCatching {
-            val process = ProcessBuilder("sh", "-c", "pidof $WECHAT_PACKAGE")
+            // 直接用 pidof，不套一层 sh：少 fork 一个进程，也少一次 shell 解析。
+            val process = ProcessBuilder("/system/bin/pidof", WECHAT_PACKAGE)
                 .redirectErrorStream(true)
                 .start()
-            process.waitFor() == 0
-        }.getOrDefault(false)
+            if (!process.waitFor(PROCESS_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                // 查不出来就当它活着：宁可少拉一次，也不要把正在用的微信重新顶到前台。
+                return@runCatching true
+            }
+            process.exitValue() == 0
+        }.getOrDefault(true)
     }
 
     private const val HEARTBEAT_URL = "https://connectivitycheck.gstatic.com/generate_204"
     private const val HEARTBEAT_TIMEOUT_MS = 3000
+    private const val PROCESS_TIMEOUT_SECONDS = 3L
+    private const val ROOT_TIMEOUT_SECONDS = 8L
+
+    /** 看门狗专用单线程：常驻但只在每个 tick 干一次活，不占用主线程。 */
+    private val watchdogExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "Hchat-KeepAlive-Watchdog").apply { isDaemon = true }
+    }
 }

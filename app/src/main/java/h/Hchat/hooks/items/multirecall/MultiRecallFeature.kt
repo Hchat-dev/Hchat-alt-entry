@@ -93,13 +93,13 @@ private class MultiRecallHooker(
         val messages = recallMessages(selected)
         if (messages == null) {
             toast(activity, if (selected.isEmpty()) "未找到选中的消息" else "只能批量撤回自己发送的消息")
-            param.result = null
+            param.setResult(null)
             return
         }
         val exitTarget = MultiSelectMessageUi.resolveExitTarget(param.thisObject, exitMethod, logger)
         if (exitTarget == null) {
             toast(activity, "无法退出多选状态，请稍后重试")
-            param.result = null
+            param.setResult(null)
             return
         }
         val sender = WeChatApis.message().sender()
@@ -110,7 +110,7 @@ private class MultiRecallHooker(
         }
         toast(activity, "已发起撤回 $success/${messages.size} 条消息")
         exitTarget.exit(logger)
-        param.result = null
+        param.setResult(null)
     }
 
     private fun recallMessages(messages: List<Any>): List<Any>? {

@@ -192,7 +192,9 @@ private class CustomFriendAvatarRuntime(
                 if (!avatarScopeEnabled(wxid, AvatarSurfaceClassifier.forView(image))) {
                     return
                 }
-                val bitmap = CustomFriendAvatarStore.loadBitmap(context.hostContext(), wxid) ?: return
+                val bitmap = CustomFriendAvatarStore.cachedBitmap(wxid)
+                    ?: CustomFriendAvatarStore.loadBitmap(context.hostContext(), wxid)
+                    ?: return
                 val nativeRadius = (param.args.getOrNull(2) as? Number)?.toFloat()
                 image.setImageBitmap(processBitmap(bitmap, nativeRadius))
                 param.result = null
@@ -247,7 +249,11 @@ private class CustomFriendAvatarRuntime(
                 if (!avatarScopeEnabled(wxid, surface)) {
                     return
                 }
-                val bitmap = CustomFriendAvatarStore.loadBitmap(context.hostContext(), wxid) ?: return
+                // draw() 每帧每头像都会进来，优先走无 IO 的内存缓存；
+                // 只有首次未命中才真正解码文件（stat + decode）。
+                val bitmap = CustomFriendAvatarStore.cachedBitmap(wxid)
+                    ?: CustomFriendAvatarStore.loadBitmap(context.hostContext(), wxid)
+                    ?: return
                 val canvas = param.args.getOrNull(0) as? Canvas ?: return
                 val drawable = param.thisObject as? Drawable ?: return
                 canvas.drawBitmap(
@@ -256,7 +262,7 @@ private class CustomFriendAvatarRuntime(
                     drawable.bounds,
                     DRAW_PAINT
                 )
-                param.result = null
+                param.setResult(null)
             }
         })
         if (legacy && constructor && modify && draw) installed = true
@@ -309,7 +315,7 @@ private class CustomFriendAvatarRuntime(
                 if (clicked.itemId != CONVERSATION_MENU_ID) return
                 val target = conversationBindings.remove(clicked) ?: return
                 val activity = target.activity.get() ?: return
-                param.result = null
+                param.setResult(null)
                 showAvatarActions(activity, target.wxid)
             }
         })
@@ -676,12 +682,19 @@ private object AvatarSurfaceClassifier {
 }
 
 private object CustomFriendAvatarBitmapProcessor {
-    private data class Entry(val factor: Float, val bitmap: java.lang.ref.WeakReference<Bitmap>)
-    private val cache = WeakHashMap<Bitmap, Entry>()
+    // 圆角结果必须持强引用：原来存 WeakReference，GC 一回收缓存就打空，
+    // draw() 每帧每头像重新 createBitmap + BitmapShader，滚动时全是主线程分配。
+    // 键是（源 Bitmap, 圆角系数）——源头像在 Store 缓存里是同一实例；系数必须参与键，
+    // 否则同一头像在原生/圆角两种形态间切换时会拿到错误形状的缓存。
+    private const val MAX_CACHE_BYTES = 16 * 1024 * 1024
+    private val cache = object : android.util.LruCache<Pair<Bitmap, Float>, Bitmap>(MAX_CACHE_BYTES) {
+        override fun sizeOf(key: Pair<Bitmap, Float>, value: Bitmap): Int = value.allocationByteCount
+    }
 
     @Synchronized
     fun round(source: Bitmap, factor: Float): Bitmap {
-        cache[source]?.takeIf { it.factor == factor }?.bitmap?.get()?.takeUnless { it.isRecycled }?.let { return it }
+        val key = source to factor
+        cache.get(key)?.takeUnless { it.isRecycled }?.let { return it }
         return runCatching {
             val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
             val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
@@ -689,7 +702,7 @@ private object CustomFriendAvatarBitmapProcessor {
             }
             val radius = minOf(source.width, source.height) * factor
             Canvas(output).drawRoundRect(0f, 0f, source.width.toFloat(), source.height.toFloat(), radius, radius, paint)
-            cache[source] = Entry(factor, java.lang.ref.WeakReference(output))
+            cache.put(key, output)
             output
         }.getOrDefault(source)
     }

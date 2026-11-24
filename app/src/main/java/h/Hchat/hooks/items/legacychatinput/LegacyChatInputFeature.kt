@@ -1,6 +1,8 @@
 package h.Hchat.hooks.items.legacychatinput
 
 import de.robv.android.xposed.XC_MethodHook
+import h.Hchat.hooks.api.core.WeChatApis
+import h.Hchat.hooks.api.model.WeChatVersionMatch
 import h.Hchat.hooks.core.BaseFeature
 import h.Hchat.hooks.core.FeatureContext
 import h.Hchat.hooks.core.HookRegistry
@@ -21,13 +23,15 @@ class LegacyChatInputFeature : BaseFeature() {
         if (!packageName.startsWith(WECHAT_PACKAGE_PREFIX)) return
         if (loadPackageParam.processName != null && loadPackageParam.processName != packageName) return
 
-        val versionCode = runCatching {
-            context.hostContext().packageManager.getPackageInfo(packageName, 0).versionCode
-        }.getOrElse {
-            logError("读取微信版本失败，旧版输入框 Hook 未安装", it)
+        // 版本判定改用 versionName 归一化比较。
+        // 原实现拿 PackageInfo.versionCode 直接比 3220，但 3220 是 versionName 里的
+        // 内部 build 号（8.0.80_3220），PackageInfo 实际返回 280005032，判断恒为 false，
+        // Hook 会静默不安装。
+        val version = WeChatApis.version()?.current() ?: run {
+            logError("读取微信版本失败，旧版输入框 Hook 未安装", null)
             return
         }
-        if (versionCode != LegacyChatInputPolicy.TARGET_VERSION_CODE) return
+        if (!WeChatVersionMatch.matches(version, TARGET_MAIN_VERSION, TARGET_BUILD_NO)) return
 
         val classLoader = context.hostClassLoader()
         val configManagerClass = KavaReflector.loadClass(CONFIG_MANAGER_CLASS, classLoader)
@@ -75,11 +79,10 @@ class LegacyChatInputFeature : BaseFeature() {
                     )
                     if (LegacyChatInputPolicy.shouldForceLegacy(
                             enabled = enabled,
-                            versionCode = versionCode,
                             configClassName = config.javaClass.name
                         )
                     ) {
-                        param.result = 0
+                        param.setResult(0)
                     }
                 }
             })
@@ -95,16 +98,31 @@ class LegacyChatInputFeature : BaseFeature() {
         private const val CONFIG_MANAGER_CLASS = "tc2.e"
         private const val CONFIG_BASE_CLASS = "ee5.e"
         private const val CONFIG_READ_METHOD = "c"
+
+        // 与 LegacyChatInputPolicy 里的常量保持同值，直接内联避免跨 object 的
+        // 编译期常量解析问题。
+        private const val TARGET_MAIN_VERSION = "8.0.80"
+        private const val TARGET_BUILD_NO = 3220L
     }
 }
 
 internal object LegacyChatInputPolicy {
-    const val TARGET_VERSION_CODE = 3220
+    /**
+     * 主版本名，对应 `PackageInfo.versionName` 去掉 `_build` 后缀。
+     * 真正的门控见 [WeChatVersionMatch.matches]。
+     */
+    const val TARGET_MAIN_VERSION = "8.0.80"
+
+    /** 内部 build 号，对应 `versionName` 的 `_3220` 后缀，**不是** `PackageInfo.versionCode`。 */
+    const val TARGET_BUILD_NO = 3220L
+
     const val INPUT_BAR_CONFIG_CLASS_NAME =
         "com.tencent.mm.repairer.config.chatting.RepairerConfigInputBarVoiceInput"
 
-    fun shouldForceLegacy(enabled: Boolean, versionCode: Int, configClassName: String): Boolean =
-        enabled &&
-            versionCode == TARGET_VERSION_CODE &&
-            configClassName == INPUT_BAR_CONFIG_CLASS_NAME
+    /**
+     * 版本匹配已在安装阶段完成（见 [LegacyChatInputFeature.onFeatureInstall]），
+     * 这里只判断开关与配置对象，避免每次读配置都重复比对版本。
+     */
+    fun shouldForceLegacy(enabled: Boolean, configClassName: String): Boolean =
+        enabled && configClassName == INPUT_BAR_CONFIG_CLASS_NAME
 }

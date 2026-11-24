@@ -2,6 +2,7 @@ package h.Hchat.hooks.core
 
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
+import h.Hchat.utils.SelfFrameRegistry
 import java.lang.reflect.Member
 import java.util.concurrent.CancellationException
 
@@ -37,6 +38,9 @@ class HookRegistry private constructor() {
         val unhook = XposedBridge.hookMethod(method, callback)
         if (unhook != null) {
             unhooks.add(unhook)
+            // release 走 R8 后类名会被改短，反检测的栈帧过滤没法按前缀识别自身帧，
+            // 所以在注册这一刻把回调类的真实运行时类名记下来（见 SelfFrameRegistry）。
+            SelfFrameRegistry.register(callback.javaClass)
         }
         unhook
     }

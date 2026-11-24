@@ -3,6 +3,9 @@ package h.Hchat.hooks.core
 import h.Hchat.hooks.api.core.WechatApiFeature
 import h.Hchat.hooks.items.audiotransform.AudioTransformFeature
 import h.Hchat.hooks.items.antirecall.AntiRecallFeature
+import h.Hchat.hooks.items.antidetect.StackTraceGuardFeature
+import h.Hchat.hooks.items.antidetect.TelemetryGuardFeature
+import h.Hchat.hooks.items.antidetect.XposedProbeFeature
 import h.Hchat.hooks.items.atallnotify.AtAllNotificationBlockFeature
 import h.Hchat.hooks.items.automessageforward.AutoMessageForwardFeature
 import h.Hchat.hooks.items.autoreply.AutoReplyFeature
@@ -45,6 +48,7 @@ import h.Hchat.hooks.items.messagetextcolor.MessageTextColorFeature
 import h.Hchat.hooks.items.messageblock.MessageBlockFeature
 import h.Hchat.hooks.items.messageforward.MessageForwardFeature
 import h.Hchat.hooks.items.miniprogrambaselib.FakeMiniProgramBaseLibFeature
+import h.Hchat.hooks.items.miniprogramforceshare.MiniProgramForceShareFeature
 import h.Hchat.hooks.items.miniprogramsplashad.SkipGlobalMiniProgramSplashAdsFeature
 import h.Hchat.hooks.items.miniprogramvideoad.SkipMiniProgramVideoAdsFeature
 import h.Hchat.hooks.items.musicorder.QQMusicOrderFeature
@@ -60,6 +64,7 @@ import h.Hchat.hooks.items.moments.MomentsPostNotificationFeature
 import h.Hchat.hooks.items.moments.RemoveMomentsAdsFeature
 import h.Hchat.hooks.items.moments.SnsAntiRecallFeature
 import h.Hchat.hooks.items.moments.MomentsUploadTailFeature
+import h.Hchat.hooks.items.moments.MomentsVideoAutoPlayFeature
 import h.Hchat.hooks.items.momentsfake.MomentsFakeInteractionFeature
 import h.Hchat.hooks.items.multirecall.MultiRecallFeature
 import h.Hchat.hooks.items.payment.core.AutoRedPacketFeature
@@ -77,12 +82,16 @@ import h.Hchat.hooks.items.quickterminate.QuickTerminateFeature
 import h.Hchat.hooks.items.realtail.RealNameTailFeature
 import h.Hchat.hooks.items.roundavatar.RoundAvatarFeature
 
+import h.Hchat.hooks.items.screenshot.ScreenshotForwardButtonFeature
 import h.Hchat.hooks.items.script.ScriptPluginFeature
 import h.Hchat.hooks.items.scheduledtask.ScheduledTaskFeature
 import h.Hchat.hooks.items.selectedmessages.SelectedMessagesFeature
 import h.Hchat.hooks.items.settings.SettingsFeature
 import h.Hchat.hooks.items.shortvideo.FinderMediaDownloadFeature
+import h.Hchat.hooks.items.sportstep.SportStepFeature
 import h.Hchat.hooks.items.statuslimit.StatusTextLimitFeature
+import h.Hchat.hooks.items.subscribe.RemoveSubscribeAdsFeature
+import h.Hchat.hooks.items.articleads.RemoveArticleAdsFeature
 import h.Hchat.hooks.items.swipequote.SwipeQuoteFeature
 import h.Hchat.hooks.items.tablet.WeChatTabletFeature
 import h.Hchat.hooks.items.textspeech.TextSpeechFeature
@@ -159,6 +168,7 @@ object FeatureRegistry {
             .register(FakeLocationFeature())
             .register(GameEmojiFeature())
             .register(FakeMiniProgramBaseLibFeature())
+            .register(MiniProgramForceShareFeature())
             .register(SkipMiniProgramVideoAdsFeature())
             .register(SkipGlobalMiniProgramSplashAdsFeature())
             .register(QQMusicOrderFeature())
@@ -178,9 +188,14 @@ object FeatureRegistry {
             .register(GroupLeaveMonitorFeature())
             .register(GroupRenameMonitorFeature())
             .register(RemoveMomentsAdsFeature())
+            .register(MomentsVideoAutoPlayFeature())
             .register(EditMessageFeature())
             .register(EmojiSaveFeature())
             .register(EmojiCollectionLimitFeature())
+            .register(ScreenshotForwardButtonFeature())
+            .register(StackTraceGuardFeature())
+            .register(XposedProbeFeature())
+            .register(TelemetryGuardFeature())
             .register(VoicePreviewFeature())
             .register(VoiceForwardFeature())
             .register(SelectedMessagesFeature())
@@ -189,6 +204,9 @@ object FeatureRegistry {
             .register(FakeScanCameraFeature())
             .register(ProtobufPacketFeature())
             .register(StatusTextLimitFeature())
+            .register(RemoveSubscribeAdsFeature())
+            .register(RemoveArticleAdsFeature())
+            .register(SportStepFeature())
             .register(FinderMediaDownloadFeature())
             .register(HchatExtraFeature())
             .register(ScriptPluginFeature())

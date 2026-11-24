@@ -64,6 +64,16 @@ class ViewBackdrop internal constructor(
     internal var layoutDirection: LayoutDirection = LayoutDirection.Ltr
     private var version by mutableIntStateOf(0)
 
+    // 上一次真正录制时的快照。录制一次要把整个微信内容层（整屏 View 树）重绘进
+    // GraphicsLayer，是全项目最贵的绘制开销之一。原来 drawBackdrop 每次调用都
+    // 重录一遍：底栏自己的选中动画、角标变化、任何原因引起的重组都会触发，
+    // 等于屏幕亮着就一直重复画一遍微信界面。这里只在内容真的脏了（version 变化）
+    // 或尺寸变了的时候才重录，其余情况直接复用上一帧的图层。
+    private var recordedVersion = -1
+    private var recordedWidth = 0
+    private var recordedHeight = 0
+    private val sourceLocation = IntArray(2)
+
     override val isCoordinatesDependent: Boolean = true
 
     override var offsetResidualX: Float = 0f
@@ -82,6 +92,11 @@ class ViewBackdrop internal constructor(
         val height = view.height
         if (width <= 0 || height <= 0) return false
 
+        val currentVersion = version
+        if (currentVersion == recordedVersion && width == recordedWidth && height == recordedHeight) {
+            return true
+        }
+
         graphicsLayer.record(density, layoutDirection, IntSize(width, height)) {
             drawIntoCanvas { canvas ->
                 val nativeCanvas = canvas.nativeCanvas
@@ -91,6 +106,9 @@ class ViewBackdrop internal constructor(
                 nativeCanvas.restoreToCount(saveCount)
             }
         }
+        recordedVersion = currentVersion
+        recordedWidth = width
+        recordedHeight = height
         return true
     }
 
@@ -106,9 +124,9 @@ class ViewBackdrop internal constructor(
         recordSource()
 
         val barInWindow = barCoordinates.positionInWindow()
-        val viewLocation = IntArray(2).also(view::getLocationInWindow)
-        val offsetX = barInWindow.x - viewLocation[0]
-        val offsetY = barInWindow.y - viewLocation[1]
+        sourceLocation.also { view.getLocationInWindow(it) }
+        val offsetX = barInWindow.x - sourceLocation[0]
+        val offsetY = barInWindow.y - sourceLocation[1]
 
         if (downscaleFactor > 1) {
             val inverse = 1f / downscaleFactor

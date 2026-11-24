@@ -7593,6 +7593,10 @@ internal fun AboutCard(context: Context) {
             onDismissRequest = { showHistoryDialog = false },
             content = {
                 Column {
+                    // 按 versionCode 判定「当前」：热修包还没补条目时也能标出最近一条。
+                    val currentEntry = remember(moduleVersion) {
+                        ModuleChangelog.current(BuildConfig.VERSION_CODE, moduleVersion)
+                    }
                     // 内容限高滚动：条目可能很长，但关闭按钮始终固定可见，不依赖点外部区域。
                     Column(
                         modifier = Modifier
@@ -7602,7 +7606,7 @@ internal fun AboutCard(context: Context) {
                         ModuleChangelog.entries.forEachIndexed { index, entry ->
                             if (index > 0) InsetDivider(start = 0.dp)
                             Text(
-                                if (entry.version == moduleVersion) "${entry.version}（当前）" else entry.version,
+                                if (entry === currentEntry) "${entry.version}（当前）" else entry.version,
                                 color = MiuixTheme.colorScheme.onSurface,
                                 fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier.padding(top = 12.dp)

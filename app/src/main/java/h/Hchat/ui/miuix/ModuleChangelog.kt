@@ -18,11 +18,36 @@ package h.Hchat.ui.miuix
 internal data class ModuleChangelogEntry(
     val version: String,
     val notes: List<String>
-)
+) {
+    /** 由版本名推导的 versionCode；解析失败为 0。 */
+    val versionCode: Int = changelogVersionCode(version) ?: 0
+}
+
+/**
+ * 四段版本名 → versionCode，规则与 `app/build.gradle.kts` 保持一致：
+ * `主 * 1_000_000 + 次 * 10_000 + 修订 * 100 + 补丁`。
+ *
+ * 放在顶层函数而不是 object 成员：`entries` 初始化时就会构造条目，
+ * 若条目反过来调用 object 自己的方法，等于在自身初始化过程中重入。
+ */
+private fun changelogVersionCode(name: String): Int? {
+    val parts = name.split('.')
+    if (parts.size != 4) return null
+    val numbers = parts.map { it.trim().toIntOrNull() ?: return null }
+    if (numbers.any { it < 0 || it > 99 }) return null
+    return numbers[0] * 1_000_000 + numbers[1] * 10_000 + numbers[2] * 100 + numbers[3]
+}
 
 internal object ModuleChangelog {
     /** 新的在上。版本号按发布顺序倒序排列。 */
     val entries: List<ModuleChangelogEntry> = listOf(
+        ModuleChangelogEntry(
+            "6.7.7.9",
+            listOf(
+                "修复更新日志弹窗无法关闭：补关闭按钮并接管返回键",
+                "内容限高滚动，关闭入口不随列表滚走"
+            )
+        ),
         ModuleChangelogEntry(
             "6.7.7.8",
             listOf(
@@ -88,7 +113,16 @@ internal object ModuleChangelog {
         )
     )
 
-    /** 当前安装版本对应的条目，找不到返回 null。 */
-    fun current(versionName: String): ModuleChangelogEntry? =
-        entries.firstOrNull { it.version == versionName }
+    /**
+     * 当前安装版本对应的条目。
+     *
+     * 先按版本名精确匹配；热修包（如 6.7.7.10 还没补条目）则退化为
+     * "versionCode 不超过当前版本的最近一条"，避免整页都没有「当前」标记。
+     */
+    fun current(versionCode: Int, versionName: String = ""): ModuleChangelogEntry? {
+        entries.firstOrNull { versionName.isNotBlank() && it.version == versionName }?.let { return it }
+        return entries
+            .filter { it.versionCode in 1..versionCode }
+            .maxByOrNull { it.versionCode }
+    }
 }

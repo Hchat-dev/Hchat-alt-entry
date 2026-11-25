@@ -60,17 +60,19 @@ object RuntimeHooks {
                 var produced: Any? = null
                 try {
                     callback.before(param)
-                    produced = if (param.returnEarly) {
-                        param.result
-                    } else {
+                    if (!param.returnEarly) {
                         val next = param.args
                         val unchanged = next.size == original.size &&
                             (0 until next.size).all { next[it] === original[it] }
                         param.result = if (unchanged) chain.proceed() else chain.proceed(next)
-                        param.result
                     }
+                    produced = param.result
+                    // 关键：after 阶段对返回值的改写必须生效。
+                    // 旧 API 里 after 里 `param.setResult(x)` / `param.result = x` 会覆盖返回值，
+                    // 设置页注入（往设置列表/Map 里塞 Hchat 条目）正好依赖这一点；
+                    // 若只返回 after 之前的值，用户看到的就是「设置里没有 Hchat 入口」。
                     callback.after(param)
-                    produced
+                    param.result
                 } catch (error: Throwable) {
                     param.throwable = error
                     runCatching { callback.after(param) }

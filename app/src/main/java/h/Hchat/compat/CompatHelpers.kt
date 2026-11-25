@@ -37,6 +37,47 @@ object CompatHelpers {
     }
 
 
+    /**
+     * 沿继承链查找方法。
+     *
+     * 旧 `XposedHelpers.findAndHookMethod` 就是这么做的（先 `getDeclaredMethod`，再逐级
+     * `getSuperclass()`）；直接 `getDeclaredMethod` 只查本类，会让"方法声明在父类"的
+     * 场景静默失败 —— 设置页入口消失就是这类问题的高危点，所以这里必须与旧语义一致。
+     */
+    @JvmStatic
+    fun findMethodInHierarchy(
+        clazz: Class<*>?,
+        name: String?,
+        types: Array<out Class<*>>
+    ): java.lang.reflect.Method? {
+        val methodName = name.orEmpty()
+        var current: Class<*>? = clazz
+        while (current != null) {
+            runCatching { current.getDeclaredMethod(methodName, *types) }.getOrNull()?.let { return it }
+            current.declaredMethods.firstOrNull {
+                it.name == methodName && it.parameterTypes.contentEquals(types)
+            }?.let { return it }
+            current = current.superclass
+        }
+        return null
+    }
+
+    /** 按 Class + 方法名 + 参数类型注册 hook；定位失败返回 null（与旧 API 一致）。 */
+    @JvmStatic
+    fun hookByClass(
+        clazz: Class<*>?,
+        methodName: String?,
+        types: Array<out Class<*>>,
+        callback: de.robv.android.xposed.XC_MethodHook?
+    ): de.robv.android.xposed.XC_MethodHook.Unhook? {
+        if (clazz == null || callback == null) return null
+        val method = findMethodInHierarchy(clazz, methodName, types) ?: return null
+        return runCatching {
+            method.isAccessible = true
+            de.robv.android.xposed.XC_MethodHook.Unhook(RuntimeHooks.hook(method, callback))
+        }.getOrNull()
+    }
+
     private fun findMethod(
         clazz: Class<*>,
         name: String,

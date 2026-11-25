@@ -27,7 +27,10 @@ object XposedHelpers {
         return CompatHelpers.callStaticMethod(target, methodName.orEmpty(), *args)
     }
 
-    /** 旧 API 语义：定位失败返回 null，调用方用 `!= null` 判空。 */
+    /**
+     * 旧 API 语义：`findMethodExact` 会沿继承链查找，定位失败返回 null。
+     * 这里是**唯一**的按类名注册入口，设置页等关键注入点都走它。
+     */
     @JvmStatic
     fun findAndHookMethod(
         className: String?,
@@ -37,19 +40,21 @@ object XposedHelpers {
     ): XC_MethodHook.Unhook? {
         val callback = parameterTypesAndCallback.lastOrNull() as? XC_MethodHook ?: return null
         val types = parameterTypesAndCallback.dropLast(1).mapNotNull { it as? Class<*> }.toTypedArray()
-        return runCatching {
-            val clazz = CompatHelpers.findClass(className.orEmpty(), classLoader)
-            val method = clazz.getDeclaredMethod(methodName.orEmpty(), *types)
-            method.isAccessible = true
-            XC_MethodHook.Unhook(h.Hchat.compat.RuntimeHooks.hook(method, callback))
-        }.getOrNull()
+        val clazz = runCatching {
+            CompatHelpers.findClass(className.orEmpty(), classLoader)
+        }.getOrNull() ?: return null
+        return CompatHelpers.hookByClass(clazz, methodName, types, callback)
     }
 
-    /** Class 入参重载：调用方已持有 Class 对象时使用。 */
+    /** Class 入参重载：调用方已持有 Class 对象时使用（同样沿继承链查找）。 */
     @JvmStatic
     fun findAndHookMethod(
         clazz: Class<*>,
         methodName: String?,
         vararg parameterTypesAndCallback: Any?
-    ): XC_MethodHook.Unhook? = findAndHookMethod(clazz.name, clazz.classLoader, methodName, *parameterTypesAndCallback)
+    ): XC_MethodHook.Unhook? {
+        val callback = parameterTypesAndCallback.lastOrNull() as? XC_MethodHook ?: return null
+        val types = parameterTypesAndCallback.dropLast(1).mapNotNull { it as? Class<*> }.toTypedArray()
+        return CompatHelpers.hookByClass(clazz, methodName, types, callback)
+    }
 }

@@ -86,7 +86,16 @@ open class XC_MethodHook @JvmOverloads constructor(
 
         fun hasThrowable(): Boolean = throwable != null
 
-        fun getResult(): Any? {
+        /**
+         * 与旧 API 一致：**不**因异常而抛出，只返回 result 字段。
+         * 需要"异常优先"语义时用 [getResultOrThrowable]。
+         */
+        fun getResult(): Any? = result
+
+        fun getThrowable(): Throwable? = throwable
+
+        /** 旧 API 的 `getResultOrThrowable()`：有异常则抛出，否则返回值。 */
+        fun getResultOrThrowable(): Any? {
             val error = throwable
             if (error != null) throw error
             return result

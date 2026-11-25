@@ -42,6 +42,13 @@ internal object ModuleChangelog {
     /** 新的在上。版本号按发布顺序倒序排列。 */
     val entries: List<ModuleChangelogEntry> = listOf(
         ModuleChangelogEntry(
+            "6.7.7.12",
+            listOf(
+                "修复微信设置页 Hchat 入口消失：兼容层现在会采用 after 钩子对返回值的改写",
+                "方法定位恢复沿继承链查找（对齐旧 XposedHelpers 语义）"
+            )
+        ),
+        ModuleChangelogEntry(
             "6.7.7.11",
             listOf(
                 "Xposed API 82 迁移到 LibXposed API 102：入口改为 XposedModule，底层 hook 全部走 intercept 链",

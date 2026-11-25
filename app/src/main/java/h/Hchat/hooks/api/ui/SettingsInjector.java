@@ -163,7 +163,19 @@ public class SettingsInjector {
 
         try {
             // Hook SettingsUI.initView()
-            Method initView = dex.settingsUIClass.getDeclaredMethod("initView");
+            // 8.0.80 起设置界面已换成 MainSettingsUI，SettingsUI 可能整个不存在；
+            // 这里判空 + 沿继承链查找（对齐旧 XposedHelpers.findMethodExact 语义），
+            // 避免直接 getDeclaredMethod 抛异常被外层 catch 吞掉、看不出到底跳在哪一步。
+            if (dex.settingsUIClass == null) {
+                logDetail("[Legacy] SettingsUI 类不存在，跳过 Legacy 注入");
+                return;
+            }
+            Method initView = h.Hchat.compat.CompatHelpers.findMethodInHierarchy(
+                    dex.settingsUIClass, "initView", new Class<?>[0]);
+            if (initView == null) {
+                logDetail("[Legacy] SettingsUI.initView 未找到，跳过 Legacy 注入");
+                return;
+            }
             initView.setAccessible(true);
             HookRegistry.get().add(HookRegistry.get().hook(initView,
                     new XC_MethodHook() {

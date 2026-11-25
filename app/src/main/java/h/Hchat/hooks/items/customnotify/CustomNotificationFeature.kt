@@ -29,6 +29,12 @@ class CustomNotificationFeature : BaseFeature() {
         }
     }
 
+    override fun onFeatureDestroy(context: FeatureContext) {
+        // 注册的快捷回复广播必须成对注销，否则功能关闭后旧通知的动作广播
+        // 仍会投递进来并触发数据库写入。
+        CustomNotificationRuntime.unregisterNotificationActionReceiver()
+    }
+
     companion object {
         const val ID = "custom_notification"
         private const val TAG = "[Hchat:CustomNotification]"

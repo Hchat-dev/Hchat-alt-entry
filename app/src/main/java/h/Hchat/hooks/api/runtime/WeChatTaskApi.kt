@@ -12,7 +12,9 @@ import android.os.Handler
 import android.os.Looper
 import android.text.TextUtils
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -29,7 +31,23 @@ class WeChatTaskApi(
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val executor = Executors.newCachedThreadPool()
+    /**
+     * 异步任务线程池。
+     *
+     * 原来用 `Executors.newCachedThreadPool()`：它是**无界**的，突发 N 个任务就创建
+     * N 条线程，空闲 60 秒才回收。功能层里 `runAsync` 被多处调用（批量操作、定时任务），
+     * 一旦同时涌入几十个任务，就会瞬间拉起几十条线程跟微信主线程抢 CPU 和内存，
+     * 表现为卡顿 + 内存抖动。
+     *
+     * 改成有界池：最多 4 条线程，队列上限 128，超出直接丢弃（这类后台任务
+     * 丢掉比拖死进程划算）。线程带名字便于排查。
+     */
+    private val executor = ThreadPoolExecutor(
+        2, 4, 30L, TimeUnit.SECONDS,
+        LinkedBlockingQueue<Runnable>(128),
+        { runnable -> Thread(runnable, "Hchat-Task").apply { isDaemon = true } },
+        ThreadPoolExecutor.DiscardPolicy()
+    )
     private val delayedTasks = ConcurrentHashMap<String, Runnable>()
     private val exactTasks = ConcurrentHashMap<String, ExactTask>()
     private val lastRunTimes = ConcurrentHashMap<String, Long>()

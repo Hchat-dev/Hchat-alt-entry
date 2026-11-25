@@ -40,8 +40,10 @@ object ScriptMessageHook {
         ThreadPoolExecutor.AbortPolicy()
     )
     private val mediaDispatchExecutor = ThreadPoolExecutor(
-        2,
-        2,
+        // 一次群内图片/视频连发会让每条消息在补查里忙等落库，2 线程很快排队溢出
+        // 丢弃事件；4 线程仍属常驻少量 daemon 线程，排队容量不变但裕量大得多。
+        4,
+        4,
         0L,
         TimeUnit.MILLISECONDS,
         ArrayBlockingQueue(MEDIA_DISPATCH_QUEUE_CAPACITY),
@@ -157,6 +159,8 @@ object ScriptMessageHook {
         val msgId = message.getMsgId()
         val msgSvrId = message.getMsgSvrId()
         if (msgId <= 0L && msgSvrId <= 0L) return message
+        // 事件本身已稳定（如已带 svrId 的消息）就不必再查库等落库，直接返回。
+        if (isStableMediaMessage(message, finder)) return message
         val store = runCatching { WeChatApis.message().store() }.getOrNull() ?: return message
         val talker = message.getTalker()
         val deadline = System.currentTimeMillis() + MEDIA_MESSAGE_WAIT_MS
@@ -206,19 +210,19 @@ object ScriptMessageHook {
         if (msgSvrId > 0L) {
             keys += "svr:$talker:$msgSvrId"
         }
-        keys += buildString {
-            append("raw:")
-            append(talker).append('|')
-            append(sender).append('|')
-            append(type).append('|')
-            append(message.isSend()).append('|')
-            append(content)
-        }
-        keys += "body:$talker|$sender|$type|$content"
+        // raw: 保留完整内容做精确去重；body:/chat: 只存"长度+哈希"摘要——
+        // 这两个键本来只用于窗口期（1 秒）内识别同一内容的重复事件，
+        // 全量内容会让 recentMessages 里驻留最多三份长文本（上限 4096 条）。
+        val digest = contentDigest(content)
+        keys += "body:$talker|$sender|$type|$digest"
         if (message.isSend()) {
-            keys += "chat:$talker|$type|$content"
+            keys += "chat:$talker|$type|$digest"
         }
         return keys
+    }
+
+    private fun contentDigest(content: String): String {
+        return "${content.length}:${content.hashCode()}"
     }
 
     private fun dedupWindowMs(key: String): Long {

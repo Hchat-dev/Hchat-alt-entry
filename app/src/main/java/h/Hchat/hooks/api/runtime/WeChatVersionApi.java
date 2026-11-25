@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.os.Build;
+import android.os.SystemClock;
 import android.text.TextUtils;
 
 import h.Hchat.hooks.api.model.WeChatVersionInfo;
@@ -43,22 +44,38 @@ public final class WeChatVersionApi {
         return hostContext != null;
     }
 
+    /**
+     * 构建版本信息的间隔下限。
+     *
+     * [build] 一点都不便宜：getPackageInfo 是跨进程调用，还要 stat APK、
+     * 反射读 BuildConfig、正则匹配 ClassLoader 描述，必要时递归扫描
+     * files/tinker 目录。原实现每次调用 current() 都会完整 build 一遍，
+     * 高频调用时既吃 CPU 又产生大量临时字符串。
+     *
+     * 版本号在进程生命周期内几乎不变，只有 Tinker 热更新才会切 clientVersion，
+     * 因此 3 秒窗口足够。窗口外仍会重新 build 并与缓存比对，语义不变。
+     */
+    private static final long REBUILD_INTERVAL_MS = 3_000L;
+
+    private volatile long lastBuildAt = 0L;
+
     public WeChatVersionInfo current() {
         WeChatVersionInfo value = cached;
-        WeChatVersionInfo fresh = build(hostContext, classLoader);
-        if (value == null) {
+        long now = SystemClock.elapsedRealtime();
+        if (value != null && !shouldRefresh(value) && now - lastBuildAt < REBUILD_INTERVAL_MS) {
+            return value;
+        }
+        synchronized (this) {
+            value = cached;
+            now = SystemClock.elapsedRealtime();
+            if (value != null && !shouldRefresh(value) && now - lastBuildAt < REBUILD_INTERVAL_MS) {
+                return value;
+            }
+            WeChatVersionInfo fresh = build(hostContext, classLoader);
+            lastBuildAt = now;
             cached = fresh;
             return fresh;
         }
-        if (shouldRefresh(value)
-                || !TextUtils.equals(value.cacheKey, fresh.cacheKey)
-                || !TextUtils.equals(value.clientVersion, fresh.clientVersion)
-                || !TextUtils.equals(value.tinkerId, fresh.tinkerId)
-                || !TextUtils.equals(value.patchId, fresh.patchId)) {
-            cached = fresh;
-            return fresh;
-        }
-        return value;
     }
 
     public String packageName() {
@@ -286,8 +303,44 @@ public final class WeChatVersionApi {
         return info.versionCode <= 0L;
     }
 
+    /**
+     * ClassLoader 的**稳定**指纹，用于 DexMethodCache 的缓存键。
+     *
+     * 原实现直接 `hash(String.valueOf(loader))`，存在一个致命的稳定性问题：
+     * ClassLoader 普遍没有覆写 `toString()`，会退化成 `Object.toString()`，
+     * 也就是 `类名@<identityHash>`。而 identity hash 是每个进程重新分配的，
+     * 于是 cacheKey 每次启动都不同 → `DexMethodCache.ensureRuntimeKey()` 判定
+     * runtime 已变化 → 已落盘的全部定位结果被清空 → 所有功能重新做 DexKit
+     * 全量扫描。
+     *
+     * 这一条的后果正好对应"每次打开微信都卡、CPU 高、耗电快"：DexKit 扫描
+     * 要把整包 dex 解析一遍，几十个功能各来一次，全压在启动阶段。
+     *
+     * 修复方式：剥掉末尾的 `@identityHash`，只对稳定部分取指纹。
+     * `PathClassLoader` 的 toString 通常带 DexPathList 完整路径，本身稳定且能
+     * 区分主包与插件包；只有退化形态才需要剥离。
+     */
     private static String loaderHash(ClassLoader loader) {
-        return Integer.toHexString(String.valueOf(loader).hashCode());
+        if (loader == null) return "";
+        String text = String.valueOf(loader);
+        int at = text.lastIndexOf('@');
+        if (at > 0 && at < text.length() - 1) {
+            String tail = text.substring(at + 1);
+            // Object.toString() 的尾巴是 1~8 位十六进制；DexPathList 里的路径不会命中。
+            if (tail.length() <= 8 && isHex(tail)) {
+                text = text.substring(0, at);
+            }
+        }
+        return Integer.toHexString(text.hashCode());
+    }
+
+    private static boolean isHex(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex) return false;
+        }
+        return true;
     }
 
     private static String safe(String value) {

@@ -1,12 +1,16 @@
 package h.Hchat.hooks.core
 
 import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
+import h.Hchat.compat.RuntimeHooks
+import h.Hchat.utils.SelfFrameRegistry
 import java.lang.reflect.Member
 import java.util.concurrent.CancellationException
 
 /**
- * 统一保存 Xposed hook 句柄，便于防御性卸载。
+ * 统一保存 hook 句柄，便于防御性卸载。
+ *
+ * 迁移到 LibXposed 后，句柄类型换成 [io.github.libxposed.api.XposedInterface.HookHandle]，
+ * 对外仍是 `XC_MethodHook.Unhook`（由 [RuntimeHooks] 包装），因此 100+ 处调用点不用改。
  */
 class HookRegistry private constructor() {
     private val lock = Any()
@@ -34,10 +38,13 @@ class HookRegistry private constructor() {
         if (!isInstallationGenerationActive(installationGeneration())) {
             throw CancellationException("安装代次已失效")
         }
-        val unhook = XposedBridge.hookMethod(method, callback)
-        if (unhook != null) {
-            unhooks.add(unhook)
-        }
+        val executable = method as? java.lang.reflect.Executable
+            ?: throw IllegalArgumentException("只能 hook Method / Constructor：$method")
+        val unhook = XC_MethodHook.Unhook(RuntimeHooks.hook(executable, callback))
+        unhooks.add(unhook)
+        // release 走 R8 后类名会被改短，反检测的栈帧过滤没法按前缀识别自身帧，
+        // 所以在注册这一刻把回调类的真实运行时类名记下来（见 SelfFrameRegistry）。
+        SelfFrameRegistry.register(callback.javaClass)
         unhook
     }
 
@@ -58,7 +65,6 @@ class HookRegistry private constructor() {
     fun unhook(unhook: XC_MethodHook.Unhook?) {
         if (unhook == null) return
         unhook.unhook()
-        // Xposed 解除回调后，还必须释放模块注册表持有的句柄及脚本解释器。
         synchronized(lock) { unhooks.remove(unhook) }
     }
 
@@ -68,10 +74,7 @@ class HookRegistry private constructor() {
             unhooks.toList().also { unhooks.clear() }
         }
         for (unhook in previous) {
-            try {
-                unhook.unhook()
-            } catch (_: Throwable) {
-            }
+            runCatching { unhook.unhook() }
         }
     }
 

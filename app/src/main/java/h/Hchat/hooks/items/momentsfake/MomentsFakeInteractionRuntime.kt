@@ -323,7 +323,7 @@ internal class MomentsFakeInteractionRuntime(
                             else -> codec.matchesFakeCommentNode(reply, comments)
                         }
                         if (!fakeReply) return
-                        param.result = null
+                        param.setResult(null)
                         mainHandler.post {
                             Toast.makeText(
                                 context.hostContext(),

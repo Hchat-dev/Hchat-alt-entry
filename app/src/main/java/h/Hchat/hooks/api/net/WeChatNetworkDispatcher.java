@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Context;
 
 import h.Hchat.hooks.core.HookRegistry;
+import h.Hchat.utils.HLog;
 import h.Hchat.utils.KavaReflector;
 
 import java.lang.reflect.Field;
@@ -15,6 +16,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import de.robv.android.xposed.XC_MethodHook;
 
@@ -27,10 +31,98 @@ public class WeChatNetworkDispatcher {
         void log(String message);
     }
 
+    /**
+     * 进程级发送守卫：在每个被 hook 的网络队列方法进入前评估请求，
+     * 命中即整次丢弃（不发给微信服务器）。用于反检测功能拦截风控/埋点上报 CGI。
+     *
+     * 守卫注册与 hook 安装解耦（静态表 + volatile 读），无论谁先装、谁后装都生效；
+     * 守卫抛异常按"放行"处理（fail-open），绝不因为守卫拖垮正常收发。
+     */
+    public interface SendGuard {
+        boolean shouldBlock(Object request, String uri);
+    }
+
+    private static final CopyOnWriteArrayList<SendGuard> SEND_GUARDS = new CopyOnWriteArrayList<>();
+    /** URI 提取方法缓存：类名 -> getUri()，含负缓存（反射扫不到的类也只扫一次）。 */
+    private static final ConcurrentHashMap<String, Method> URI_METHOD_CACHE = new ConcurrentHashMap<>();
+    private static final Set<String> URI_METHOD_MISSING = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private static final AtomicBoolean URI_DIAG_LOGGED = new AtomicBoolean(false);
+    private static final AtomicLong GUARD_BLOCK_COUNTER = new AtomicLong();
+
+    /** 注册进程级发送守卫；同一实例只注册一次。 */
+    public static void registerSendGuard(SendGuard guard) {
+        if (guard != null) SEND_GUARDS.addIfAbsent(guard);
+    }
+
+    /** 注销发送守卫（功能销毁时调用）。 */
+    public static void unregisterSendGuard(SendGuard guard) {
+        if (guard != null) SEND_GUARDS.remove(guard);
+    }
+
+    /**
+     * 在队列 hook 回调里评估守卫。返回 true 表示该请求应被丢弃。
+     * 丢弃时调用方负责用 param.setResult() 给出与返回类型匹配的"失败"值。
+     */
+    private static boolean shouldGuardBlock(Object[] args, String[] blockedUriOut) {
+        try {
+            if (args == null || args.length == 0 || args[0] == null || SEND_GUARDS.isEmpty()) return false;
+            Object request = args[0];
+            String uri = resolveRequestUri(request);
+            if (uri == null) return false;
+            for (SendGuard guard : SEND_GUARDS) {
+                try {
+                    if (guard.shouldBlock(request, uri)) {
+                        blockedUriOut[0] = uri;
+                        return true;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            return false;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    /** 从请求对象上提取 CGI URI（getUri():String），带缓存；提取不到返回 null（放行）。 */
+    private static String resolveRequestUri(Object request) {
+        try {
+            Class<?> clazz = request.getClass();
+            String key = clazz.getName();
+            Method uriMethod = URI_METHOD_CACHE.get(key);
+            if (uriMethod == null) {
+                if (URI_METHOD_MISSING.contains(key)) return null;
+                uriMethod = KavaReflector.findMethodRecursive(clazz, "getUri");
+                if (uriMethod != null && uriMethod.getParameterTypes().length == 0
+                        && uriMethod.getReturnType() == String.class) {
+                    URI_METHOD_CACHE.put(key, uriMethod);
+                } else {
+                    URI_METHOD_MISSING.add(key);
+                    return null;
+                }
+            }
+            Object uri = KavaReflector.invoke(uriMethod, request);
+            if (uri instanceof String && !((String) uri).isEmpty()) {
+                if (URI_DIAG_LOGGED.compareAndSet(false, true)) {
+                    logStatic("风控上报守卫URI提取可用: " + key + " -> " + uri);
+                }
+                return (String) uri;
+            }
+            return null;
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    private static void logStatic(String message) {
+        HLog.e("[Hchat:NetworkDispatcher] " + message);
+    }
+
     private final Logger logger;
-    private Object dispatcherInstance;
-    private Method dispatcherMethod;
-    private int dispatcherArgCount = 1;
+    /** Hook 回调线程写、任意线程读，必须 volatile 才能保证可见性与发布顺序。 */
+    private volatile Object dispatcherInstance;
+    private volatile Method dispatcherMethod;
+    private volatile int dispatcherArgCount = 1;
     private List<Class<?>> queueCandidateClasses = Collections.emptyList();
     private final Set<Method> hookedQueueMethods = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
@@ -60,10 +152,26 @@ public class WeChatNetworkDispatcher {
                     try {
                         HookRegistry.get().hook(method, new XC_MethodHook() {
                             @Override
-                            protected void beforeHookedMethod(MethodHookParam param) {
+                            public void beforeHookedMethod(MethodHookParam param) {
                                 if (dispatcherInstance == null
                                         || methodPriority(method) > methodPriority(dispatcherMethod)) {
                                     cacheDispatcher(param.thisObject, method, "网络发包器已缓存");
+                                }
+                                if (SEND_GUARDS.isEmpty()) return;
+                                String[] blockedUriOut = new String[1];
+                                if (shouldGuardBlock(param.args, blockedUriOut)) {
+                                    long blockedCount = GUARD_BLOCK_COUNTER.incrementAndGet();
+                                    if (blockedCount <= 20 || blockedCount % 200 == 0) {
+                                        log("已拦截风控上报 CGI(累计" + blockedCount + "次): " + blockedUriOut[0]);
+                                    }
+                                    Class<?> returnType = method.getReturnType();
+                                    if (returnType == boolean.class || returnType == Boolean.class) {
+                                        param.setResult(Boolean.FALSE);
+                                    } else if (returnType == int.class || returnType == Integer.class) {
+                                        param.setResult(Integer.valueOf(0));
+                                    } else {
+                                        param.setResult(null);
+                                    }
                                 }
                             }
                         });
@@ -247,7 +355,7 @@ public class WeChatNetworkDispatcher {
         if (rt == boolean.class || rt == Boolean.class) score += 100;
         if (rt == int.class || rt == Integer.class) score += 20;
         if (rt == void.class) score -= 50;
-        if (method.getParameterTypes().length == 2) score += 10;
+        if (method.getParameterCount() == 2) score += 10;
         return score;
     }
 
@@ -349,9 +457,14 @@ public class WeChatNetworkDispatcher {
 
     private void cacheDispatcher(Object instance, Method method, String reason) {
         if (instance == null || method == null) return;
-        dispatcherInstance = instance;
-        dispatcherMethod = method;
+        // 发布顺序有讲究：读者以 dispatcherInstance != null 作为"已就绪"标志。
+        // 先把 argCount / method 写好，最后才写 instance，配合 volatile 写屏障，
+        // 保证读到 instance 的线程一定能看到配套的 method 与参数个数。
+        // 原来先写 instance 再写 argCount，并发首发时可能拿到 count=1 的默认值，
+        // 用错误的参数个数反射调用 → 发送间歇性失败。
         dispatcherArgCount = method.getParameterTypes().length;
+        dispatcherMethod = method;
+        dispatcherInstance = instance;
         log(reason + ": " + instance.getClass().getName() + "#" + method.getName());
     }
 

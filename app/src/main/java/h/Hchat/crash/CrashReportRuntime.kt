@@ -43,6 +43,9 @@ object CrashReportRuntime : Application.ActivityLifecycleCallbacks {
     private const val LAST_NATIVE_EXIT = "last_native_exit"
     private const val LAST_ANR_EXIT = "last_anr_exit"
 
+    /** 卡顿采样与 ANR 时间差超过这个窗口就不挂到报告里，避免用旧卡顿解释新 ANR。 */
+    private const val ANR_STALL_WINDOW_MS = 10 * 60 * 1000L
+
     private val prepared = AtomicBoolean(false)
     private val installed = AtomicBoolean(false)
     private val handlingJavaCrash = AtomicBoolean(false)
@@ -98,6 +101,9 @@ object CrashReportRuntime : Application.ActivityLifecycleCallbacks {
             pendingReportFile = File(crashDir, REPORT_PENDING)
             lastReportFile = File(crashDir, LAST_REPORT)
             environmentHeader = buildEnvironmentHeader(application)
+            // 系统 ANR trace 只有等待通道、没有 Java 栈，所以进程活着的时候得自己采样。
+            // 这里与崩溃目录共用路径：卡顿证据落盘后，ANR 报告才能在下一次启动时回收它。
+            MainThreadStallWatchdog.install(crashDir)
             if (captureEnabled) ensureJavaHandler()
         }.onFailure {
             prepared.set(false)
@@ -189,7 +195,10 @@ object CrashReportRuntime : Application.ActivityLifecycleCallbacks {
                     writer.println()
                     throwable.printStackTrace(writer)
                     writer.flush()
-                    runCatching { stream.fd.sync() }
+                    // 这里原来还有一次 stream.fd.sync()。fsync 会强制刷物理磁盘，
+                    // 低端机 eMMC 上可能耗时数百毫秒到数秒，而此刻正处在崩溃线程
+                    // （常常是主线程或持锁线程）上，会把"崩溃"拖成 ANR，反而拿不到日志。
+                    // flush + close 已把数据交给内核页缓存，进程被杀后仍会落盘。
                 }
             }
         }
@@ -250,6 +259,12 @@ object CrashReportRuntime : Application.ActivityLifecycleCallbacks {
             previousLaunch = previousLaunch,
             lastHandledTimestamp = lastAnrExit
         )
+        // 系统只给等待通道，主线程到底跑在哪一行代码里，只能靠进程活着时自己采样的记录。
+        val stallEvidence = if (systemAnr != null) {
+            MainThreadStallWatchdog.readEvidence(crashDir, ANR_STALL_WINDOW_MS)
+        } else {
+            null
+        }
         if (systemAnr != null) {
             sections += buildString {
                 appendLine("Hchat 捕获到 ANR 异常")
@@ -258,6 +273,11 @@ object CrashReportRuntime : Application.ActivityLifecycleCallbacks {
                 appendLine()
                 appendLine("--- Android ANR 退出记录 ---")
                 append(systemAnr.details)
+                if (!stallEvidence.isNullOrBlank()) {
+                    appendLine()
+                    appendLine("--- Hchat 主线程卡顿采样（ANR 前在线抓取，含 Java 堆栈）---")
+                    append(stallEvidence)
+                }
             }.trimEnd()
         }
 
@@ -265,6 +285,10 @@ object CrashReportRuntime : Application.ActivityLifecycleCallbacks {
         if (persisted) {
             if (systemExit != null) writeLong(nativeExitMarker, systemExit.timestamp)
             if (systemAnr != null) writeLong(anrExitMarker, systemAnr.timestamp)
+            // 证据已随报告落盘，删掉避免下次启动重复挂同一段。
+            if (systemAnr != null && !stallEvidence.isNullOrBlank()) {
+                MainThreadStallWatchdog.clearEvidence(crashDir)
+            }
             javaPendingFile.delete()
             nativePendingFile.delete()
             writeLong(launchMarker, System.currentTimeMillis())

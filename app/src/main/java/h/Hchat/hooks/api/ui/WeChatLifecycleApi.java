@@ -116,7 +116,7 @@ public final class WeChatLifecycleApi {
             Method method = KavaReflector.findDeclaredMethod(Activity.class, methodName);
             HookRegistry.get().hook(method, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     if (param.thisObject instanceof Activity) {
                         dispatch(new ActivityEvent(event, (Activity) param.thisObject));
                     }

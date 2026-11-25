@@ -71,6 +71,10 @@ public final class WeChatDatabaseListenerApi {
         }
     }
 
+    private static final String MESSAGE_TOKEN = "message";
+    private static final String MSG_SOURCE_OPEN = "<msgsource";
+    private static final String MSG_SOURCE_CLOSE = "</msgsource>";
+
     private final DexFinder dexFinder;
     private final ClassLoader classLoader;
     private final Logger logger;
@@ -80,8 +84,13 @@ public final class WeChatDatabaseListenerApi {
     private final Set<Method> hookedWrapperMutationMethods = ConcurrentHashMap.newKeySet();
     private final Set<Method> hookedWrapperInsertMethods = ConcurrentHashMap.newKeySet();
     // One logical operation can traverse wrapper, WCDB and Android SQLite hooks.
-    private final ThreadLocal<Integer> mutationDepth = ThreadLocal.withInitial(() -> 0);
-    private final ThreadLocal<Integer> queryDepth = ThreadLocal.withInitial(() -> 0);
+    //
+    // 深度计数器用单元素 int[] 而不是 ThreadLocal<Integer>：自动装箱会把每一次
+    // insert/update/rawQuery 都变成一个 Integer 对象分配。微信的写库频率是每秒
+    // 数十到数百次，全天累计几十万次分配，直接把 GC 压力顶上去（GC 就是耗电）。
+    // 数组元素读写零分配；线程数有限，常驻的 int[] 可以忽略。
+    private final ThreadLocal<int[]> mutationDepth = ThreadLocal.withInitial(() -> new int[1]);
+    private final ThreadLocal<int[]> queryDepth = ThreadLocal.withInitial(() -> new int[1]);
     private volatile boolean installed;
     private volatile int hookedMethodCount;
     private volatile Class<?> hookedWrapperClass;
@@ -260,7 +269,7 @@ public final class WeChatDatabaseListenerApi {
             try {
                 HookRegistry.get().hook(method, new XC_MethodHook(de.robv.android.xposed.callbacks.XCallback.PRIORITY_LOWEST) {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         if (query) {
                             if (enterQuery()) transformQuery(param.args);
                         } else {
@@ -270,7 +279,7 @@ public final class WeChatDatabaseListenerApi {
                     }
 
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
+                    public void afterHookedMethod(MethodHookParam param) {
                         if (query) {
                             leaveQuery();
                         } else if (leaveMutation()) {
@@ -304,18 +313,15 @@ public final class WeChatDatabaseListenerApi {
     }
 
     private boolean enterQuery() {
-        int depth = queryDepth.get();
-        queryDepth.set(depth + 1);
-        return depth == 0;
+        int[] depth = queryDepth.get();
+        int current = depth[0];
+        depth[0] = current + 1;
+        return current == 0;
     }
 
     private void leaveQuery() {
-        int depth = queryDepth.get();
-        if (depth <= 1) {
-            queryDepth.remove();
-        } else {
-            queryDepth.set(depth - 1);
-        }
+        int[] depth = queryDepth.get();
+        if (depth[0] > 0) depth[0]--;
     }
 
     private void transformQuery(Object[] args) {
@@ -343,25 +349,30 @@ public final class WeChatDatabaseListenerApi {
     }
 
     private void enterMutation() {
-        mutationDepth.set(mutationDepth.get() + 1);
+        mutationDepth.get()[0]++;
     }
 
     private boolean leaveMutation() {
-        int depth = mutationDepth.get();
-        if (depth <= 1) {
-            mutationDepth.remove();
+        int[] depth = mutationDepth.get();
+        if (depth[0] <= 1) {
+            depth[0] = 0;
             return true;
         }
-        mutationDepth.set(depth - 1);
+        depth[0]--;
         return false;
     }
 
     private void normalizeLegacyMsgSource(String operation, Object database, Object[] args) {
-        if (args == null) return;
+        if (args == null || args.length == 0) return;
         if (!DatabaseChange.INSERT.equals(operation) && !DatabaseChange.UPDATE.equals(operation)) return;
+        // 这个方法挂在全进程每一次 insert/update 上。原来的实现无论写的是哪张表，
+        // 都要先取 ContentValues、再对表名 toLowerCase()（每次都分配一个 String）。
+        // 微信绝大部分写入都是 rcontact、各类缓存/统计表，跟消息毫无关系。
+        // 这里先用零分配的方式判掉表名，绝大多数数据库写入到此为止。
+        String table = args[0] instanceof String ? (String) args[0] : tableArg(args);
+        if (!looksLikeMessageTable(table)) return;
         ContentValues values = contentValuesArg(args);
         if (values == null) return;
-        String table = tableArg(args);
         if (!isMessageTable(table, values)) return;
         if (!values.containsKey("msgSource")) return;
         String current = contentValueString(values, "msgSource");
@@ -372,12 +383,7 @@ public final class WeChatDatabaseListenerApi {
     }
 
     private boolean isMessageTable(String table, ContentValues values) {
-        if (TextUtils.isEmpty(table)) return false;
-        String lower = table.toLowerCase();
-        boolean tableLooksLikeMessage = "message".equals(lower)
-                || lower.startsWith("message_")
-                || lower.endsWith("_message");
-        if (!tableLooksLikeMessage) return false;
+        if (!looksLikeMessageTable(table)) return false;
         return values != null
                 && (values.containsKey("msgSource")
                 || values.containsKey("lvbuffer")
@@ -385,11 +391,40 @@ public final class WeChatDatabaseListenerApi {
                 || values.containsKey("msgSvrId"));
     }
 
+    /**
+     * 表名是否为消息表：{@code message} / {@code message_*} / {@code *_message}。
+     * 用逐字符比较代替 {@code toLowerCase()}，避免每次写库分配一个临时字符串。
+     */
+    private static boolean looksLikeMessageTable(String table) {
+        if (table == null) return false;
+        int length = table.length();
+        if (length < 7) return false;
+        if (length == 7) return asciiRegionMatches(table, 0, "message");
+        if (asciiRegionMatches(table, 0, "message_")) return true;
+        if (asciiRegionMatches(table, length - 8, "_message")) return true;
+        return false;
+    }
+
+    /** 以 ASCII 不区分大小写比较 {@code expected}（必须为小写）与 {@code source} 的指定区段。 */
+    private static boolean asciiRegionMatches(String source, int offset, String expected) {
+        int length = expected.length();
+        if (offset < 0 || offset + length > source.length()) return false;
+        for (int i = 0; i < length; i++) {
+            char actual = source.charAt(offset + i);
+            char wanted = expected.charAt(i);
+            if (actual == wanted) continue;
+            // 只有 A-Z 需要折叠，其他字符必须完全一致。
+            if (actual < 'A' || actual > 'Z') return false;
+            if ((char) (actual + 32) != wanted) return false;
+        }
+        return true;
+    }
+
     private String msgSourceFromLvBuffer(ContentValues values) {
         if (values == null || !values.containsKey("lvbuffer")) return "";
         try {
             byte[] bytes = values.getAsByteArray("lvbuffer");
-            if (bytes != null && bytes.length > 0) {
+            if (bytes != null && bytes.length > 0 && containsAsciiTag(bytes, "<msgsource")) {
                 String source = extractMsgSource(new String(bytes, StandardCharsets.UTF_8));
                 if (!TextUtils.isEmpty(source)) return source;
             }
@@ -401,6 +436,28 @@ public final class WeChatDatabaseListenerApi {
         } catch (Throwable ignored) {
             return "";
         }
+    }
+
+    /**
+     * 在原始字节里找 ASCII 片段。lvbuffer 是消息的 protobuf 原始数据，动辄几十 KB；
+     * 先按字节确认存在 {@code <msgsource}，就能省掉一次全量 String 解码
+     * （解码后还要再扫一遍，等于每条消息白白分配两份几十 KB 的字符串）。
+     */
+    private static boolean containsAsciiTag(byte[] bytes, String tag) {
+        int tagLength = tag.length();
+        int limit = bytes.length - tagLength;
+        outer:
+        for (int i = 0; i <= limit; i++) {
+            for (int j = 0; j < tagLength; j++) {
+                int actual = bytes[i + j];
+                char wanted = tag.charAt(j);
+                if (actual == wanted) continue;
+                if (actual < 'A' || actual > 'Z') continue outer;
+                if ((char) (actual + 32) != wanted) continue outer;
+            }
+            return true;
+        }
+        return false;
     }
 
     private String contentValueString(ContentValues values, String key) {
@@ -416,13 +473,22 @@ public final class WeChatDatabaseListenerApi {
 
     private String extractMsgSource(String value) {
         if (TextUtils.isEmpty(value)) return "";
-        String lower = value.toLowerCase();
-        int start = lower.indexOf("<msgsource");
+        // 原来对整串调用 toLowerCase() 再 indexOf：lvbuffer 有多长就分配多长的临时
+        // 小写副本，每条消息一次。改成原地大小写不敏感查找，零临时分配。
+        int start = indexOfIgnoreCase(value, MSG_SOURCE_OPEN, 0);
         if (start < 0) return "";
-        int end = lower.indexOf("</msgsource>", start);
+        int end = indexOfIgnoreCase(value, MSG_SOURCE_CLOSE, start + MSG_SOURCE_OPEN.length());
         if (end < 0) return "";
-        end += "</msgsource>".length();
+        end += MSG_SOURCE_CLOSE.length();
         return value.substring(start, Math.min(end, value.length())).trim();
+    }
+
+    private static int indexOfIgnoreCase(String source, String expectedLower, int from) {
+        int limit = source.length() - expectedLower.length();
+        for (int i = Math.max(0, from); i <= limit; i++) {
+            if (asciiRegionMatches(source, i, expectedLower)) return i;
+        }
+        return -1;
     }
 
     private boolean hasContentValuesArg(Class<?>[] params) {
@@ -496,7 +562,7 @@ public final class WeChatDatabaseListenerApi {
         for (Object arg : args) {
             if (!(arg instanceof String)) continue;
             String value = (String) arg;
-            if ("message".equalsIgnoreCase(value) || value.toLowerCase().contains("message")) return value;
+            if (indexOfIgnoreCase(value, MESSAGE_TOKEN, 0) >= 0) return value;
         }
         return "";
     }

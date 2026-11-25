@@ -99,7 +99,7 @@ private class CallRingtoneBlockHooker(
                                 requestId
                             )
                         }.onSuccess {
-                            param.result = null
+                            param.setResult(null)
                         }.onFailure {
                             logCoreAcknowledgeFailure(access.start, it)
                         }
@@ -118,7 +118,7 @@ private class CallRingtoneBlockHooker(
         HookRegistry.get().hook(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val outgoing = param.args?.getOrNull(outgoingArgumentIndex) as? Boolean ?: return
-                if (shouldBlock(outgoing)) param.result = null
+                if (shouldBlock(outgoing)) param.setResult(null)
             }
         })
     }

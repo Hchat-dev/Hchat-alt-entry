@@ -160,6 +160,8 @@ internal class SnsCachedPostStorage(
             ?: return false
         val rawId = KavaReflector.readField(nativeInfo, "field_snsId")
             ?: KavaReflector.readField(nativeInfo, "snsId")
+            // 8.0.80 的 SnsInfo 用 getter 暴露 snsId（字段挂在父类上），再兜一层调用。
+            ?: KavaReflector.invokeMethod(nativeInfo, "getSnsId")
             ?: return false
         val snsId = (rawId as? Number)?.toLong() ?: rawId.toString().toLongOrNull() ?: return false
         return runCatching {

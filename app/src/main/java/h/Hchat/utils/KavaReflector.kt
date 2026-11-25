@@ -5,6 +5,7 @@ import java.lang.reflect.Constructor
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Project-local wrapper around KavaRef.
@@ -13,6 +14,24 @@ import java.lang.reflect.Modifier
  * returning standard Method/Field/Constructor objects for Xposed and DexKit APIs.
  */
 object KavaReflector {
+    /**
+     * 反射结果缓存。
+     *
+     * `clazz.resolve().optional().method { }` 每次调用都要重新遍历方法表、构造 Method 对象，
+     * 再逐个 `setAccessible(true)`（每次都走一次 native 调用）。对一个有上百个方法的微信类，
+     * 单次开销在毫秒量级；而它被消息绑定、onAttachedToWindow 这类主线程路径反复调用。
+     * 线上 ANR 栈就落在这里：
+     * `KavaReflector.declaredMethods → Class.getDeclaredMethods → getParameterTypesInternal`
+     * 卡住输入分发 8 秒。
+     *
+     * 类结构在进程生命周期内不会变，缓存是安全的；空结果（找不到）也要缓存，
+     * 否则"没找到"这条路径会每次都重扫一遍，代价反而更高。
+     */
+    private val declaredMethodCache = ConcurrentHashMap<Class<*>, List<Method>>()
+    private val declaredFieldCache = ConcurrentHashMap<Class<*>, List<Field>>()
+    /** 防御性上限：防止极端情况下把整包类的方法表都留在内存里。 */
+    private const val REFLECT_CACHE_LIMIT = 4096
+
     @JvmStatic
     fun loadClass(name: String?, classLoader: ClassLoader?): Class<*>? {
         if (name.isNullOrEmpty()) return null
@@ -32,17 +51,23 @@ object KavaReflector {
     @JvmStatic
     fun declaredMethods(clazz: Class<*>?): List<Method> {
         if (clazz == null) return emptyList()
-        return runCatching {
+        declaredMethodCache[clazz]?.let { return it }
+        val resolved = runCatching {
             clazz.resolve().optional(silent = true).method { }.map { it.self.accessible() }
         }.getOrDefault(emptyList())
+        if (declaredMethodCache.size >= REFLECT_CACHE_LIMIT) declaredMethodCache.clear()
+        return declaredMethodCache.putIfAbsent(clazz, resolved) ?: resolved
     }
 
     @JvmStatic
     fun declaredFields(clazz: Class<*>?): List<Field> {
         if (clazz == null) return emptyList()
-        return runCatching {
+        declaredFieldCache[clazz]?.let { return it }
+        val resolved = runCatching {
             clazz.resolve().optional(silent = true).field { }.map { it.self.accessible() }
         }.getOrDefault(emptyList())
+        if (declaredFieldCache.size >= REFLECT_CACHE_LIMIT) declaredFieldCache.clear()
+        return declaredFieldCache.putIfAbsent(clazz, resolved) ?: resolved
     }
 
     @JvmStatic

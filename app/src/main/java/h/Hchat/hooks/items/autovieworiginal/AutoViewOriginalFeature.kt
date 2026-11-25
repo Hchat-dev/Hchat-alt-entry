@@ -188,8 +188,8 @@ private class AutoViewOriginalRuntime(
         return (KavaReflector.invoke(getter, pager) as? Number)?.toInt()
     }
 
-    private fun readFieldByType(owner: Any, typeName: String): Any? {
-        var current: Class<*>? = owner.javaClass
+    private fun readFieldByType(owner: Any?, typeName: String): Any? {
+        var current: Class<*>? = owner?.javaClass
         while (current != null && current != Any::class.java) {
             KavaReflector.declaredFields(current).firstOrNull { field ->
                 !Modifier.isStatic(field.modifiers) && field.type.name == typeName

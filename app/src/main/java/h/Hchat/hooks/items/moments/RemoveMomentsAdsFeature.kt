@@ -59,7 +59,7 @@ class RemoveMomentsAdsFeature : BaseFeature() {
                     HookRegistry.get().hook(constructor, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (!isEnabled(context)) return
-                            param.result = null
+                            param.setResult(null)
                         }
                     })
                     installedLoaders.add(key)

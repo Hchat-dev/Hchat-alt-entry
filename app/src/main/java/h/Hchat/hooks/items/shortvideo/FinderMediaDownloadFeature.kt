@@ -263,7 +263,7 @@ private class FinderMediaDownloadHooker(
         if (item.itemId != MENU_COPY_LINK && item.itemId != MENU_DOWNLOAD) return
         val media = findFinderMedia(param) ?: run {
             toast("未找到视频号媒体")
-            param.result = null
+            param.setResult(null)
             return
         }
         if (item.itemId == MENU_COPY_LINK) {
@@ -271,7 +271,7 @@ private class FinderMediaDownloadHooker(
         } else {
             downloadMedia(media)
         }
-        param.result = null
+        param.setResult(null)
     }
 
     private fun copyMediaLinks(media: FinderMediaDownloadSupport.FinderMedia) {

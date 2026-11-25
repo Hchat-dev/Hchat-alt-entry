@@ -571,7 +571,7 @@ class ScriptPluginBridge internal constructor(
     ): XC_MethodHook.Unhook {
         val unhook = HookRegistry.get().hook(member, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                param.result = callback.apply(param)
+                param.setResult(callback.apply(param))
             }
         })
         rememberHook(pluginId, unhook)

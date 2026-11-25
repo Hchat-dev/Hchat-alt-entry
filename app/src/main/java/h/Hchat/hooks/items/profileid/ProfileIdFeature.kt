@@ -110,7 +110,7 @@ class ProfileIdFeature : BaseFeature() {
                             if (preferenceKey(preference) != CHATROOM_PREF_KEY) return
                             val profileId = resolveProfileId(activity, kind) ?: return
                             copyProfileId(activity, profileId)
-                            param.result = true
+                            param.setResult(true)
                         }
                     })
                 }

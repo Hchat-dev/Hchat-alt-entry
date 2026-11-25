@@ -384,7 +384,7 @@ private class HchatExtraHooker(
         ) ?: return false
         hooked = hookOnce(intercept) { param ->
             if (enabled(HchatExtraSettings.KEY_SKIP_WEB_RISK, HchatExtraSettings.DEFAULT_SKIP_WEB_RISK)) {
-                param.result = false
+                param.setResult(false)
             }
         } || hooked
         val safe = locateMethodsInClass(
@@ -395,7 +395,7 @@ private class HchatExtraHooker(
             ?: return hooked
         hooked = hookOnce(safe) { param ->
             if (enabled(HchatExtraSettings.KEY_SKIP_WEB_RISK, HchatExtraSettings.DEFAULT_SKIP_WEB_RISK)) {
-                param.result = true
+                param.setResult(true)
             }
         } || hooked
         return hooked
@@ -502,7 +502,7 @@ private class HchatExtraHooker(
                 val pref = groupHistoryClickedPreference(param.args)
                     ?: return@hookOnce
                 openGroupMemberHistory(activity)
-                param.result = true
+                param.setResult(true)
             } || hooked
         }
         if (!hooked && firstInstall) hookedClasses.remove(clazz)
@@ -521,6 +521,10 @@ private class HchatExtraHooker(
             val installed = runCatching {
                 HookRegistry.get().hook(bind, object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
+                        // 开关判断必须放在最前：此方法挂在全局消息绑定上，每条消息都会调用。
+                        // 关闭状态下若继续执行，会对每个 bind 参数做反射 + 父链上溯 + 全局锁，
+                        // 聊天列表滚动时形成明显的掉帧。
+                        if (!messageDetailsConfig.enabled) return
                         // The payload method belongs to a shared base adapter. Only chat rows apply.
                         if (bind in adapterBinds && adapterClass?.isInstance(param.thisObject) != true) return
                         val state = runCatching {
@@ -535,6 +539,8 @@ private class HchatExtraHooker(
                     }
 
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        // 与 before 保持同一顺序，保证状态栈配对；关闭时直接退出。
+                        if (!messageDetailsConfig.enabled) return
                         if (bind in adapterBinds && adapterClass?.isInstance(param.thisObject) != true) return
                         val stack = messageDetailsBindStates.get()
                         val state = stack?.pollLast() ?: MessageDetailsBindState(null)

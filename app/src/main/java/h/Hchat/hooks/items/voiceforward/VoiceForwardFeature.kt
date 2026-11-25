@@ -389,15 +389,16 @@ private class VoiceForwardHooker(
         }
     }
 
-    private fun removeVoiceFromFavoriteAdapter(adapter: Any) {
+    private fun removeVoiceFromFavoriteAdapter(adapter: Any?) {
         if (!favoriteClickForwardEnabled()) return
         val adapterActivity = favoriteSelectorActivity(adapter)
         val currentActivity = WeChatApis.currentActivity()?.currentActivity()
         val selectorActivity = adapterActivity ?: currentActivity
         val currentName = selectorActivity?.javaClass?.name
         if (adapter !in favoriteSelectorAdapters && currentName !in FAVORITE_SELECTOR_UI_NAMES) return
-        favoriteSelectorAdapters.add(adapter)
-        val filterField = KavaReflector.findFieldRecursive(adapter.javaClass, "f") ?: return
+        val adapterNonNull = adapter ?: return
+        favoriteSelectorAdapters.add(adapterNonNull)
+        val filterField = KavaReflector.findFieldRecursive(adapterNonNull.javaClass, "f") ?: return
         val filter = KavaReflector.readField(filterField, adapter)
         removeFavoriteVoiceType(filter)
         registerFavoriteSelectorFilter(adapter)
@@ -429,7 +430,7 @@ private class VoiceForwardHooker(
                             if (param.thisObject !in favoriteSelectorFilters) return
                             val item = param.args?.getOrNull(0) ?: return
                             if (favoriteType(item) == FAVORITE_VOICE_TYPE) {
-                                param.result = false
+                                param.setResult(false)
                             }
                         }
                     })
@@ -497,8 +498,8 @@ private class VoiceForwardHooker(
         return null
     }
 
-    private fun favoriteSelectorActivity(adapter: Any): Activity? {
-        var current: Class<*>? = adapter.javaClass
+    private fun favoriteSelectorActivity(adapter: Any?): Activity? {
+        var current: Class<*>? = adapter?.javaClass
         while (current != null && current != Any::class.java) {
             for (field in KavaReflector.declaredFields(current)) {
                 val value = KavaReflector.readField(field, adapter)
@@ -671,13 +672,13 @@ private class VoiceForwardHooker(
         val activity = resolveActivity(args.getOrNull(1))
         if (message == null || activity == null) {
             toast(activity, "语音消息不可用")
-            param.result = true
+            param.setResult(true)
             return
         }
         val source = resolveVoiceSource(message)
         if (source == null) {
             toast(activity, "语音文件不存在")
-            param.result = true
+            param.setResult(true)
             return
         }
         if (menuItem.itemId == MENU_SAVE_ID) {
@@ -685,7 +686,7 @@ private class VoiceForwardHooker(
         } else {
             showContactPicker(activity, source)
         }
-        param.result = true
+        param.setResult(true)
     }
 
     private fun handleFavoriteClick(param: XC_MethodHook.MethodHookParam) {
@@ -704,12 +705,12 @@ private class VoiceForwardHooker(
             ?: pendingFavoriteVoiceSource(param.thisObject, activity)
         if (source == null) {
             toast(activity, if (favorite == null) "收藏语音不可用" else "收藏语音文件不存在")
-            param.result = null
+            param.setResult(null)
             return
         }
         val targetActivity = activity
         if (targetActivity == null) {
-            param.result = null
+            param.setResult(null)
             return
         }
         if (menuItem.itemId == MENU_SAVE_ID) {
@@ -717,7 +718,7 @@ private class VoiceForwardHooker(
         } else {
             showContactPicker(targetActivity, source)
         }
-        param.result = null
+        param.setResult(null)
     }
 
     private fun handleFavoriteSelectClick(param: XC_MethodHook.MethodHookParam) {
@@ -741,18 +742,18 @@ private class VoiceForwardHooker(
         val target = favoriteSelectTargetTalker(activity ?: param.thisObject)
         if (target.isBlank()) {
             toast(activity, "当前聊天不可用")
-            param.result = null
+            param.setResult(null)
             return
         }
         val source = resolveFavoriteVoiceSource(favorite)
         if (source == null) {
             toast(activity, "收藏语音文件不存在")
-            param.result = null
+            param.setResult(null)
             return
         }
         val targetActivity = activity
         if (targetActivity == null || targetActivity.isFinishing) {
-            param.result = null
+            param.setResult(null)
             return
         }
         if (!seenDialogs.contains(targetActivity)) {
@@ -774,7 +775,7 @@ private class VoiceForwardHooker(
                 }
             )
         }
-        param.result = null
+        param.setResult(null)
     }
 
     private fun handleMultiNativeVoiceMenuClick(param: XC_MethodHook.MethodHookParam, exitMethod: Method) {
@@ -790,19 +791,19 @@ private class VoiceForwardHooker(
         val messages = MultiSelectMessageResolver.resolve(param.thisObject)
         if (messages.isEmpty() || messages.any { !isVoiceMessage(it) }) {
             toast(activity, "未找到选中的语音消息")
-            param.result = null
+            param.setResult(null)
             return
         }
         val sources = messages.mapNotNull { resolveVoiceSource(it) }
         if (sources.size != messages.size) {
             toast(activity, "部分语音文件不存在")
-            param.result = null
+            param.setResult(null)
             return
         }
         val exitTarget = MultiSelectMessageUi.resolveExitTarget(param.thisObject, exitMethod, logger)
         if (exitTarget == null) {
             toast(activity, "无法退出多选状态，请稍后重试")
-            param.result = null
+            param.setResult(null)
             return
         }
         if (activity == null) {
@@ -841,7 +842,7 @@ private class VoiceForwardHooker(
                 onDismiss = {}
             )
         }
-        param.result = null
+        param.setResult(null)
     }
 
     private fun mergeMultiVoices(

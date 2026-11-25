@@ -14,7 +14,14 @@ import okhttp3.Response
 
 internal enum class WorkImageFormat(val extension: String) {
     JPEG("jpg"),
-    WEBP("webp")
+    PNG("png"),
+    WEBP("webp"),
+
+    /**
+     * 动图。微信把 GIF 当作普通图片发送就会逐帧播放，所以这里只需要保留原始字节，
+     * 不能像静态图那样转码成 JPEG。
+     */
+    GIF("gif")
 }
 
 internal data class DownloadedWorkImage(
@@ -27,6 +34,14 @@ internal object WorkImageFormatSniffer {
     fun detect(head: ByteArray): WorkImageFormat? {
         if (head.size >= 3 && head[0] == 0xff.toByte() && head[1] == 0xd8.toByte() && head[2] == 0xff.toByte()) {
             return WorkImageFormat.JPEG
+        }
+        if (head.size >= 8 && head[0] == 0x89.toByte() && String(head, 1, 3, Charsets.US_ASCII) == "PNG") {
+            return WorkImageFormat.PNG
+        }
+        if (head.size >= 6 && (String(head, 0, 6, Charsets.US_ASCII) == "GIF87a" ||
+                String(head, 0, 6, Charsets.US_ASCII) == "GIF89a")
+        ) {
+            return WorkImageFormat.GIF
         }
         if (head.size >= 12 && String(head, 0, 4, Charsets.US_ASCII) == "RIFF" &&
             String(head, 8, 4, Charsets.US_ASCII) == "WEBP") {
@@ -121,14 +136,16 @@ internal class WorkImageClient {
     private fun request(url: HttpUrl): Response = client.newCall(
         Request.Builder().url(url)
             .header("User-Agent", USER_AGENT)
-            .header("Accept", "image/avif,image/webp,image/apng,image/jpeg,*/*")
+            .header("Accept", "image/avif,image/webp,image/apng,image/gif,image/png,image/jpeg,*/*")
             .header("Accept-Encoding", "identity")
             .get().build()
     ).execute()
 
     private fun finalFiles(base: File): List<File> = listOf(
         File(base.absolutePath + ".jpg"),
-        File(base.absolutePath + ".webp")
+        File(base.absolutePath + ".png"),
+        File(base.absolutePath + ".webp"),
+        File(base.absolutePath + ".gif")
     )
 
     companion object {

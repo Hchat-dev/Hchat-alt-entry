@@ -8,6 +8,7 @@ import h.Hchat.hooks.core.FeatureContext
 import h.Hchat.hooks.items.inputhint.InputHintStats
 import h.Hchat.hooks.items.inputhint.OutgoingMessageStatsRepository
 import h.Hchat.hooks.items.script.ScriptSendButtonHook
+import h.Hchat.utils.DateFormatCache
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -106,11 +107,12 @@ class MessageAffixFeature : BaseFeature() {
 
     private fun formatSendTime(pattern: String?): String {
         val normalized = MessageAffixSettings.normalizeTimeFormat(pattern)
-        return runCatching {
-            SimpleDateFormat(normalized, Locale.getDefault()).format(Date())
-        }.getOrElse {
-            SimpleDateFormat(MessageAffixSettings.DEFAULT_TIME_FORMAT, Locale.getDefault()).format(Date())
-        }
+        // 每次发消息都会调用，走缓存的 formatter。
+        return DateFormatCache.format(
+            System.currentTimeMillis(),
+            normalized,
+            MessageAffixSettings.DEFAULT_TIME_FORMAT
+        )
     }
 
     private fun scheduleSendButtonHook(context: FeatureContext) {

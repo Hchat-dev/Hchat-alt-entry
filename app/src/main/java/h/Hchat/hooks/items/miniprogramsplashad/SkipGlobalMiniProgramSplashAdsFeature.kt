@@ -193,7 +193,7 @@ private fun hookSplashAdCheckMethod(method: Method, context: Context) {
     HookRegistry.get().hook(method, object : XC_MethodHook() {
         override fun beforeHookedMethod(param: MethodHookParam) {
             if (SkipGlobalMiniProgramSplashAdsFeature.isEnabled(context)) {
-                param.result = false
+                param.setResult(false)
             }
         }
     })

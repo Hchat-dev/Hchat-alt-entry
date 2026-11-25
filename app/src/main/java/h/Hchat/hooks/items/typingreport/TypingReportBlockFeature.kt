@@ -73,7 +73,7 @@ private class TypingReportBlockHooker(
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (isEnabled()) {
-                        param.result = null
+                        param.setResult(null)
                     }
                 }
             })

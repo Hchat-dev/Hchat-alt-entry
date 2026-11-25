@@ -163,6 +163,15 @@ private class CustomBottomBarRuntime(
     private val suppressedBottomBlurRoots = Collections.synchronizedMap(
         WeakHashMap<View, Unit>()
     )
+    /**
+     * suppressedBottomBlurRoots 的条目数镜像。
+     *
+     * `isBottomBlurSuppressed` 挂在 `dispatchDraw` 上——底栏每个绘制帧都会进来一次。
+     * 原来无条件 `synchronized(map) + containsKey`，等于每帧取一次锁；
+     * 绝大多数时候这张表是空的（只有主动抑制模糊的页面才非空），
+     * 用一个 volatile 计数先短路，空表时开销降到一次字段读。
+     */
+    @Volatile private var suppressedRootCount = 0
     private val failedViews = Collections.synchronizedMap(WeakHashMap<ViewGroup, Unit>())
 
     private val bottomTabClass by lazy {
@@ -312,6 +321,9 @@ private class CustomBottomBarRuntime(
         runCatching {
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    // 每个绘制帧都会进来：空表是常态（只有主动抑制模糊的页面才非空），
+                    // 所以先读 volatile 计数直接返回，连 `view.rootView` 的父链遍历都省掉。
+                    if (suppressedRootCount == 0) return
                     val view = param.thisObject as? View ?: return
                     if (!isBottomBlurSuppressed(view.rootView)) return
                     clearBottomBlurView(view, invalidate = false)
@@ -749,6 +761,7 @@ private class CustomBottomBarRuntime(
         val alreadySuppressed = synchronized(suppressedBottomBlurRoots) {
             val present = suppressedBottomBlurRoots.containsKey(root)
             suppressedBottomBlurRoots[root] = Unit
+            suppressedRootCount = suppressedBottomBlurRoots.size
             present
         }
         if (alreadySuppressed && frostedDrawHookInstalled) return
@@ -776,7 +789,10 @@ private class CustomBottomBarRuntime(
     }
 
     private fun restoreBottomBlurAreas(root: View) {
-        synchronized(suppressedBottomBlurRoots) { suppressedBottomBlurRoots.remove(root) }
+        synchronized(suppressedBottomBlurRoots) {
+            suppressedBottomBlurRoots.remove(root)
+            suppressedRootCount = suppressedBottomBlurRoots.size
+        }
         val entries = synchronized(originalBottomBlurHeights) {
             originalBottomBlurHeights.entries
                 .filter { (view, _) -> view.rootView === root }
@@ -789,7 +805,10 @@ private class CustomBottomBarRuntime(
     }
 
     private fun restoreAllBottomBlurAreas() {
-        synchronized(suppressedBottomBlurRoots) { suppressedBottomBlurRoots.clear() }
+        synchronized(suppressedBottomBlurRoots) {
+            suppressedBottomBlurRoots.clear()
+            suppressedRootCount = 0
+        }
         val entries = synchronized(originalBottomBlurHeights) {
             originalBottomBlurHeights.entries.map { it.key to it.value }
                 .also { originalBottomBlurHeights.clear() }
@@ -868,6 +887,9 @@ private class CustomBottomBarRuntime(
     }
 
     private fun isBottomBlurSuppressed(root: View): Boolean {
+        // dispatchDraw 每帧都会问一次：表为空是常态，先读一个 volatile 就返回，
+        // 不要每帧去拿 map 的监视器锁。
+        if (suppressedRootCount == 0) return false
         return synchronized(suppressedBottomBlurRoots) {
             suppressedBottomBlurRoots.containsKey(root)
         }

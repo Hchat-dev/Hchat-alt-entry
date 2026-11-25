@@ -11,39 +11,28 @@ class LegacyChatInputPolicyTest {
         assertFalse(
             LegacyChatInputPolicy.shouldForceLegacy(
                 enabled = LegacyChatInputSettings.DEFAULT_ENABLE,
-                versionCode = LegacyChatInputPolicy.TARGET_VERSION_CODE,
                 configClassName = LegacyChatInputPolicy.INPUT_BAR_CONFIG_CLASS_NAME
             )
         )
     }
 
     @Test
-    fun onlyEnabledTargetVersionAndInputBarConfigAreOverridden() {
+    fun onlyEnabledTargetInputBarConfigIsOverridden() {
         assertTrue(
             LegacyChatInputPolicy.shouldForceLegacy(
                 enabled = true,
-                versionCode = LegacyChatInputPolicy.TARGET_VERSION_CODE,
                 configClassName = LegacyChatInputPolicy.INPUT_BAR_CONFIG_CLASS_NAME
             )
         )
         assertFalse(
             LegacyChatInputPolicy.shouldForceLegacy(
                 enabled = false,
-                versionCode = LegacyChatInputPolicy.TARGET_VERSION_CODE,
                 configClassName = LegacyChatInputPolicy.INPUT_BAR_CONFIG_CLASS_NAME
             )
         )
         assertFalse(
             LegacyChatInputPolicy.shouldForceLegacy(
                 enabled = true,
-                versionCode = LegacyChatInputPolicy.TARGET_VERSION_CODE - 20,
-                configClassName = LegacyChatInputPolicy.INPUT_BAR_CONFIG_CLASS_NAME
-            )
-        )
-        assertFalse(
-            LegacyChatInputPolicy.shouldForceLegacy(
-                enabled = true,
-                versionCode = LegacyChatInputPolicy.TARGET_VERSION_CODE,
                 configClassName = "com.tencent.mm.repairer.config.chatting.RepairerConfigUseNewVoice2TxtComponent"
             )
         )

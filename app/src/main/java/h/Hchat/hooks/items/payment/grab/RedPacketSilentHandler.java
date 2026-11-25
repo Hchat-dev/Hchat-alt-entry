@@ -284,7 +284,7 @@ public class RedPacketSilentHandler {
 
             HookRegistry.get().hook(onGYNetEnd, new XC_MethodHook() {
                 @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
+                public void beforeHookedMethod(MethodHookParam param) {
                     if (!settings.isEnabled()) return;
                     try {
                         Object jsonObj = param.args != null && param.args.length > 2 ? param.args[2] : null;
@@ -439,7 +439,7 @@ public class RedPacketSilentHandler {
 
             HookRegistry.get().hook(onGYNetEnd, new XC_MethodHook() {
                 @Override
-                protected void afterHookedMethod(MethodHookParam param) {
+                public void afterHookedMethod(MethodHookParam param) {
                     if (!settings.isEnabled()) return;
                     try {
                         String sendId = state.silentOpenRequestSendIdMap.get(param.thisObject);

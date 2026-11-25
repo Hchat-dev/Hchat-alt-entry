@@ -7528,9 +7528,7 @@ internal fun AboutCard(context: Context) {
     var updateInfo by remember { mutableStateOf<ModuleUpdateInfo?>(null) }
     var showUpdateDialog by remember { mutableStateOf(false) }
     var updateError by remember { mutableStateOf("") }
-    var historyItems by remember { mutableStateOf<List<ModuleVersionHistory>>(emptyList()) }
     var showHistoryDialog by remember { mutableStateOf(false) }
-    var historyError by remember { mutableStateOf("") }
     val updatePrefs = remember { HchatStorage.preferences(context, MODULE_UPDATE_PREFS) }
     val checkForUpdate: () -> Unit = {
         updateError = "正在检查更新…"
@@ -7558,24 +7556,10 @@ internal fun AboutCard(context: Context) {
             }
         }
     }
-    val openHistory: () -> Unit = {
-        historyError = "正在加载历史版本…"
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                PluginMarketClient.moduleVersionHistory(context).map { values ->
-                    values.map { ModuleVersionHistory.fromJson(it, PluginMarketSettings.serviceUrl(context)) }
-                }
-            }
-            result.onSuccess {
-                historyItems = it
-                historyError = if (it.isEmpty()) "暂无历史版本" else ""
-                showHistoryDialog = true
-            }.onFailure {
-                historyError = "加载失败：${it.message ?: "网络不可用"}"
-                showHistoryDialog = true
-            }
-        }
-    }
+    // 「历史版本」现在是随包发布的更新日志：只读本地数据，不发请求、不带下载入口。
+    val openHistory: () -> Unit = { showHistoryDialog = true }
+    // 更新日志打开时接管系统返回键：先关弹窗，而不是直接退出整个设置页。
+    RegisterSettingsBackHandler(if (showHistoryDialog) ({ showHistoryDialog = false }) else null)
     SettingsCard {
         InfoRow(label = "版本", value = moduleVersion, onClick = checkForUpdate)
         InsetDivider()
@@ -7583,7 +7567,7 @@ internal fun AboutCard(context: Context) {
         InsetDivider()
         InfoRow(label = "作者", value = "。。")
         InsetDivider()
-        InfoRow(label = "历史版本", value = "查看更新说明和下载", onClick = openHistory)
+        InfoRow(label = "历史版本", value = "查看更新日志", onClick = openHistory)
         if (updateError.isNotBlank()) {
             Text(updateError, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
         }
@@ -7605,22 +7589,44 @@ internal fun AboutCard(context: Context) {
     if (showHistoryDialog) {
         WindowDialog(
             show = true,
-            title = "历史版本",
+            title = "更新日志",
             onDismissRequest = { showHistoryDialog = false },
             content = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    if (historyError.isNotBlank()) {
-                        Text(historyError, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, fontSize = 14.sp)
+                Column {
+                    // 按 versionCode 判定「当前」：热修包还没补条目时也能标出最近一条。
+                    val currentEntry = remember(moduleVersion) {
+                        ModuleChangelog.current(BuildConfig.VERSION_CODE, moduleVersion)
                     }
-                    historyItems.forEachIndexed { index, version ->
-                        if (index > 0) InsetDivider(start = 0.dp)
-                        Text("${version.versionName}（${version.versionCode}）", color = MiuixTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
-                        Text(version.releaseNotes.ifBlank { "暂无更新说明" }, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
-                        Text(formatFileSize(version.size), color = MiuixTheme.colorScheme.onSurfaceVariantSummary, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
-                        TextButton("下载此版本", onClick = {
-                            activity?.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(version.downloadUrl)))
-                        }, colors = ButtonDefaults.textButtonColorsPrimary())
+                    // 内容限高滚动：条目可能很长，但关闭按钮始终固定可见，不依赖点外部区域。
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        ModuleChangelog.entries.forEachIndexed { index, entry ->
+                            if (index > 0) InsetDivider(start = 0.dp)
+                            Text(
+                                if (entry === currentEntry) "${entry.version}（当前）" else entry.version,
+                                color = MiuixTheme.colorScheme.onSurface,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(top = 12.dp)
+                            )
+                            entry.notes.forEach { note ->
+                                Text(
+                                    "· $note",
+                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
+                        }
                     }
+                    TextButton(
+                        text = "关闭",
+                        onClick = { showHistoryDialog = false },
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                        colors = ButtonDefaults.textButtonColorsPrimary()
+                    )
                 }
             }
         )
@@ -7649,35 +7655,6 @@ internal fun AboutCard(context: Context) {
             )
         }
     }
-}
-@Composable
-internal fun ModuleUpdateDialog(
-    context: Context,
-    activity: Activity?,
-    update: ModuleUpdateInfo,
-    prefs: SharedPreferences,
-    onDismiss: () -> Unit
-) {
-    WindowDialog(
-        show = true,
-        title = "发现新版本 ${update.versionName}",
-        onDismissRequest = onDismiss,
-        content = {
-            Column {
-                Text(update.releaseNotes.ifBlank { "有新的模块版本可用" }, color = MiuixTheme.colorScheme.onSurface, fontSize = 14.sp)
-                Row(Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton("忽略此版本", onClick = {
-                        prefs.edit().putInt(MODULE_UPDATE_IGNORED_CODE, update.versionCode).putBoolean("has_update", false).apply()
-                        onDismiss()
-                    }, modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
-                    TextButton("下载更新", onClick = {
-                        activity?.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.downloadUrl)))
-                        onDismiss()
-                    }, modifier = Modifier.weight(1f), colors = ButtonDefaults.textButtonColorsPrimary())
-                }
-            }
-        }
-    )
 }
 
 internal data class ModuleVersionHistory(

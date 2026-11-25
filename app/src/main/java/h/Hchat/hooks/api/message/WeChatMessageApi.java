@@ -1006,8 +1006,18 @@ public final class WeChatMessageApi {
         String key = pendingLocalSendKey(talker, content);
         if (TextUtils.isEmpty(key)) return false;
         CopyOnWriteArrayList<PendingLocalSend> list = PENDING_LOCAL_SENDS.get(key);
-        if (list == null || list.isEmpty()) return false;
-        PendingLocalSend pending = list.remove(0);
+        if (list == null) return false;
+        // isEmpty() 之后再 remove(0) 不是原子操作：2.5 秒兜底任务可能正好在这两步之间
+        // 把列表清空，remove(0) 会抛 IndexOutOfBoundsException 直接进微信调用栈。
+        // 改成遍历快照 + remove(对象)，被别人先取走就安全返回 false。
+        PendingLocalSend pending = null;
+        for (PendingLocalSend candidate : list) {
+            if (list.remove(candidate)) {
+                pending = candidate;
+                break;
+            }
+        }
+        if (pending == null) return false;
         ScheduledFuture<?> future = pending.future;
         if (future != null) future.cancel(false);
         if (list.isEmpty()) PENDING_LOCAL_SENDS.remove(key, list);

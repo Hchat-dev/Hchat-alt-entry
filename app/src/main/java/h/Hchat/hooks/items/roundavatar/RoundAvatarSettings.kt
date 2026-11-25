@@ -15,14 +15,44 @@ object RoundAvatarSettings {
     const val MIN_RADIUS_FACTOR = 0.1f
     const val MAX_RADIUS_FACTOR = 0.5f
 
+    // 这两个值在头像 draw() 热路径上被反复读（自定义头像/圆角头像两个 feature 都会查），
+    // 加读缓存 + 配置变更监听失效，行为与直读一致。
+    @Volatile private var enableCache: Boolean? = null
+    @Volatile private var factorCache: Float? = null
+    @Volatile private var listenerBound = false
+
+    private val invalidator = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == null || key == KEY_ENABLE) enableCache = null
+        if (key == null || key == KEY_RADIUS_FACTOR) factorCache = null
+    }
+
+    private fun ensureListener(context: Context) {
+        if (listenerBound) return
+        synchronized(this) {
+            if (listenerBound) return
+            runCatching {
+                preferences(context).registerOnSharedPreferenceChangeListener(invalidator)
+            }
+            listenerBound = true
+        }
+    }
+
     fun enabled(context: Context): Boolean {
-        return preferences(context).getBoolean(KEY_ENABLE, DEFAULT_ENABLE)
+        ensureListener(context)
+        enableCache?.let { return it }
+        val v = preferences(context).getBoolean(KEY_ENABLE, DEFAULT_ENABLE)
+        enableCache = v
+        return v
     }
 
     fun radiusFactor(context: Context): Float {
-        return normalizeRadiusFactor(
+        ensureListener(context)
+        factorCache?.let { return it }
+        val v = normalizeRadiusFactor(
             preferences(context).getFloat(KEY_RADIUS_FACTOR, DEFAULT_RADIUS_FACTOR)
         )
+        factorCache = v
+        return v
     }
 
     fun normalizeRadiusFactor(value: Float): Float {

@@ -41,9 +41,19 @@ object ScriptSendButtonHook {
     @Volatile
     private var inputTrackingHookInstalled = false
     private val chatFooterFieldCache = mutableMapOf<Class<*>, Field?>()
-    private val inputFieldCache = mutableMapOf<Class<*>, Field?>()
-    private val noArgMethodCache = ConcurrentHashMap<String, Method>()
-    private val oneArgMethodCache = ConcurrentHashMap<String, Method>()
+    /**
+     * 输入框字段缓存。值可能是 [Field]，也可能是 [NoInputField] 哨兵。
+     *
+     * 以前这里是 `Map<Class<*>, Field?>`，用 `containsKey` + 取值判空 —— 结果"没找到"
+     * 这个结论永远存不住（存了 null，读出来还是 null，跟"没缓存过"没法区分），
+     * 于是每次 ChatFooter 挂载都要把所有字段连同继承链重新反射扫一遍。
+     * 线上 ANR（Input dispatching 8 秒超时）就是这条路径堆出来的。
+     */
+    private val inputFieldCache = mutableMapOf<Class<*>, Any>()
+    private val noArgMethodCache = ConcurrentHashMap<String, Any>()
+    private val oneArgMethodCache = ConcurrentHashMap<String, Any>()
+    /** 按类型缓存打分结果，同一类型只算一次（ChatFooter 里大量字段是同一个 View 类型）。 */
+    private val inputScoreCache = ConcurrentHashMap<Class<*>, Int>()
     private val handlers = CopyOnWriteArrayList<RegisteredHandler>()
     private val longPressStates = Collections.synchronizedMap(
         WeakHashMap<View, SendLongPressState>()
@@ -141,7 +151,7 @@ object ScriptSendButtonHook {
                             rememberPendingInputStart(view, inputStart, talker, text)
                             clearInputStart(view)
                         }
-                        param.result = null
+                        param.setResult(null)
                     }
 
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -190,7 +200,20 @@ object ScriptSendButtonHook {
         return runCatching {
             HookRegistry.get().hook(attachMethod, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    trackInputView(findInputView(param.thisObject))
+                    // 同样是 attach 期回调：先查缓存，未命中推到下一帧再扫，
+                    // 避免在 View 树挂载过程中做主线程反射全扫（会顶住输入分发）。
+                    val footer = param.thisObject ?: return
+                    val cached = findInputViewCached(footer)
+                    if (cached != null) {
+                        trackInputView(cached)
+                        return
+                    }
+                    val view = footer as? View
+                    if (view != null) {
+                        view.post { trackInputView(findInputView(footer)) }
+                    } else {
+                        trackInputView(findInputView(footer))
+                    }
                 }
             })
             true
@@ -217,6 +240,10 @@ object ScriptSendButtonHook {
         return runCatching {
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    // 极廉价 gate：本 hook 挂在全局 View.dispatchTouchEvent 上，
+                    // 全进程每个 View 的每次触摸都会进来。没有脚本注册长按回调时
+                    // （绝大多数用户）直接退出，避免白白做两次同步表查询。
+                    if (!h.Hchat.hooks.items.script.ScriptPluginRuntime.hasLongSendButtonCallbacks()) return
                     if (dispatchingSyntheticCancel.get() == true) return
                     runCatching {
                         handleLongPressTouch(param, sendClickListenerClass)
@@ -226,6 +253,7 @@ object ScriptSendButtonHook {
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!h.Hchat.hooks.items.script.ScriptPluginRuntime.hasLongSendButtonCallbacks()) return
                     val view = param.thisObject as? View ?: return
                     val event = param.args?.getOrNull(0) as? MotionEvent ?: return
                     if (event.actionMasked == MotionEvent.ACTION_DOWN && param.result != true) {
@@ -666,12 +694,20 @@ object ScriptSendButtonHook {
         return false
     }
 
+    /**
+     * 只读缓存、绝不触发扫描。挂在 `onAttachedToWindow` 这类 attach 期热路径上的调用方
+     * 必须走这个入口，把可能很贵的首次解析留到 attach 完成之后。
+     */
+    internal fun findInputViewCached(chatFooter: Any): Any? {
+        val cached = synchronized(inputFieldCache) { inputFieldCache[chatFooter.javaClass] }
+        return (cached as? Field)?.let { KavaReflector.readField(it, chatFooter) }
+    }
+
     internal fun findInputView(chatFooter: Any): Any? {
         val clazz = chatFooter.javaClass
-        val cached = synchronized(inputFieldCache) {
-            if (inputFieldCache.containsKey(clazz)) inputFieldCache[clazz] else null
-        }
-        if (cached != null) return KavaReflector.readField(cached, chatFooter)
+        val cached = synchronized(inputFieldCache) { inputFieldCache[clazz] }
+        if (cached === NoInputField) return null
+        if (cached is Field) return KavaReflector.readField(cached, chatFooter)
         var best: Field? = null
         var bestScore = 0
         for (field in allFields(clazz)) {
@@ -685,20 +721,23 @@ object ScriptSendButtonHook {
             }
         }
         val resolved = if (bestScore >= 3) best else null
-        if (resolved != null) {
-            synchronized(inputFieldCache) { inputFieldCache[clazz] = resolved }
+        // 找到和没找到都写缓存：没找到说明这个宿主的布局跟预期不同，
+        // 再扫一遍只会得到同样的结论，但每次都要付出整轮反射的代价。
+        synchronized(inputFieldCache) {
+            inputFieldCache[clazz] = resolved ?: NoInputField
         }
         return resolved?.let { KavaReflector.readField(it, chatFooter) }
     }
 
     private fun inputScore(clazz: Class<*>): Int {
+        inputScoreCache[clazz]?.let { return it }
         var score = 0
         if (findNoArgMethod(clazz, "getText") != null) score += 3
         if (findNoArgMethod(clazz, "clearComposingText") != null) score += 2
         if (findNoArgMethod(clazz, "getSimilarPasteSeqStr") != null) score += 2
         if (findNoArgMethod(clazz, "getPasterContent") != null) score += 1
         if (View::class.java.isAssignableFrom(clazz)) score += 1
-        return score
+        return inputScoreCache.putIfAbsent(clazz, score) ?: score
     }
 
     private fun invokeNoArg(receiver: Any, name: String): Any? {
@@ -714,7 +753,9 @@ object ScriptSendButtonHook {
     private fun findNoArgMethod(clazz: Class<*>?, name: String): Method? {
         if (clazz == null) return null
         val key = clazz.name + "#" + name
-        noArgMethodCache[key]?.let { return it }
+        val cached = noArgMethodCache[key]
+        if (cached === NoMethod) return null
+        if (cached is Method) return cached
         var current: Class<*>? = clazz
         while (current != null && current != Any::class.java) {
             for (method in KavaReflector.declaredMethods(current)) {
@@ -726,13 +767,16 @@ object ScriptSendButtonHook {
             }
             current = current.superclass
         }
+        noArgMethodCache[key] = NoMethod
         return null
     }
 
     private fun findOneArgMethod(clazz: Class<*>?, name: String, argType: Class<*>): Method? {
         if (clazz == null) return null
         val key = clazz.name + "#" + name + "#" + argType.name
-        oneArgMethodCache[key]?.let { return it }
+        val cached = oneArgMethodCache[key]
+        if (cached === NoMethod) return null
+        if (cached is Method) return cached
         var current: Class<*>? = clazz
         while (current != null && current != Any::class.java) {
             for (method in KavaReflector.declaredMethods(current)) {
@@ -746,8 +790,13 @@ object ScriptSendButtonHook {
             }
             current = current.superclass
         }
+        oneArgMethodCache[key] = NoMethod
         return null
     }
+
+    /** 负结果哨兵：区分"查过、没有"和"还没查过"。 */
+    private object NoInputField
+    private object NoMethod
 
     private fun wrap(type: Class<*>): Class<*> {
         if (!type.isPrimitive) return type

@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit
 
 object HchatMediaDownloader {
     private const val FINDER_VIDEO_DECRYPT_BYTES = 128 * 1024
+    private const val BUFFER_SIZE = 64 * 1024
 
     private val httpClient by lazy {
         OkHttpClient.Builder()
@@ -178,7 +179,10 @@ object HchatMediaDownloader {
         original.inputStream().use { input ->
             output.outputStream().use { out ->
                 val cryptoState = CryptoState(key)
-                val buffer = ByteArray(32 * 1024 * 1024)
+                // 只需要解密头部 FINDER_VIDEO_DECRYPT_BYTES(128KB)，原来按
+                // 32MB 分配缓冲：一次视频号下载就凭空吃掉 32MB 堆，低内存机型
+                // 会直接触发 GC 抖动甚至 OOM。缓冲大小不影响功能，只是 IO 次数多几次。
+                val buffer = ByteArray(BUFFER_SIZE)
                 var remaining = FINDER_VIDEO_DECRYPT_BYTES
                 while (true) {
                     val read = input.read(buffer)

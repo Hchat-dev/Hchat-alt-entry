@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
@@ -291,7 +292,10 @@ internal object ScriptFloatingGlassBarHost {
     private fun FloatingHostTheme(activity: Activity, content: @Composable () -> Unit) {
         val dark = (activity.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
-        MiuixTheme(colors = if (dark) darkColorScheme() else lightColorScheme(), content = content)
+        MiuixTheme(
+            colors = remember(dark) { if (dark) darkColorScheme() else lightColorScheme() },
+            content = content
+        )
     }
 
     private data class ContentChild(

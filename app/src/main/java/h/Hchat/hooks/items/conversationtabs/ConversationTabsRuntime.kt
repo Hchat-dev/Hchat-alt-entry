@@ -86,6 +86,7 @@ internal object ConversationTabsRuntime {
         var layoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null,
         var drawListener: ViewTreeObserver.OnPreDrawListener? = null,
         var attachListener: View.OnAttachStateChangeListener? = null,
+        var renderKey: String = "",
         val buttons: MutableList<Pair<String, LinearLayout>> = arrayListOf()
     )
 
@@ -166,7 +167,7 @@ internal object ConversationTabsRuntime {
         }
     }
 
-    private fun ensureHost(owner: Any, root: View) {
+    private fun ensureHost(owner: Any?, root: View) {
         runCatching {
             val previous = hosts[owner]?.get()
             if (previous != null && previous.root === root &&
@@ -482,14 +483,31 @@ internal object ConversationTabsRuntime {
     }
 
     private fun render(host: Host) {
-        setHostEnabled(host, config.enabled && account.isNotBlank())
+        val wantEnabled = config.enabled && account.isNotBlank()
+        // setHostEnabled 每次都会把标签栏置为 INVISIBLE 等下一帧重新定位，
+        // 状态没变时不要重复调用，否则切换/返回都会闪一下。
+        if (host.enabled != wantEnabled) setHostEnabled(host, wantEnabled)
+        if (!host.enabled) {
+            if (host.buttons.isNotEmpty() || host.content.childCount > 0) {
+                host.content.removeAllViews()
+                host.buttons.clear()
+            }
+            host.renderKey = ""
+            return
+        }
+        val key = renderKeyOf(host)
+        // onResume、配置监听都会触发重绘；配置没变时只刷新选中态，不重建整排按钮。
+        if (key == host.renderKey && host.buttons.isNotEmpty()) {
+            highlight(host)
+            return
+        }
+        host.renderKey = key
         host.content.removeAllViews()
         host.buttons.clear()
-        if (!host.enabled) return
         val ctx = host.root.context
         val density = ctx.resources.displayMetrics.density
         fun dp(value: Int) = (value * density + .5f).toInt()
-        val dark = ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val dark = isDark(host)
         host.strip.setBackgroundColor(if (dark) Color.rgb(25, 25, 25) else Color.rgb(247, 247, 247))
         config.tabs.forEach { tab ->
             val button = LinearLayout(ctx).apply {
@@ -526,8 +544,21 @@ internal object ConversationTabsRuntime {
         highlight(host)
     }
 
+    private fun isDark(host: Host): Boolean =
+        host.root.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+
+    private fun renderKeyOf(host: Host): String = buildString {
+        append(account).append('|').append(if (isDark(host)) 1 else 0).append('|')
+        config.tabs.forEach { tab ->
+            append(tab.id).append(':').append(tab.name).append(':').append(tab.display)
+                .append(':').append(tab.icon).append(':').append(tab.iconPath)
+                .append(':').append(if (loadedIcons.containsKey(tab.iconPath)) 'y' else 'n')
+                .append(';')
+        }
+    }
+
     private fun highlight(host: Host) {
-        val dark = host.root.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val dark = isDark(host)
         val density = host.root.resources.displayMetrics.density
         host.buttons.forEach { (id, button) ->
             val selected = id == selectedId

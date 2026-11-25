@@ -71,7 +71,7 @@ public final class WeChatMessageEventApi {
                 if (addMsgArgIndexes.isEmpty()) continue;
                 HookRegistry.get().hook(method, new XC_MethodHook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         if (param.args == null) return;
                         for (int index : addMsgArgIndexes) {
                             if (index >= 0 && index < param.args.length && param.args[index] != null) {
@@ -137,7 +137,7 @@ public final class WeChatMessageEventApi {
         }
         HookRegistry.get().hook(dexFinder.patDisplayTemplateMethod, new XC_MethodHook() {
             @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
+            public void beforeHookedMethod(MethodHookParam param) {
                 if (param.args == null || param.args.length < 1) return;
                 dispatchPatMsg(param.args[0], param.args.length > 1 ? param.args[1] : null);
             }

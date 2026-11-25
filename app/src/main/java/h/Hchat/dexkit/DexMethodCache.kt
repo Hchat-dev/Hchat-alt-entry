@@ -2,6 +2,7 @@ package h.Hchat.dexkit
 
 import android.content.Context
 import android.content.SharedPreferences
+import h.Hchat.hooks.api.core.WeChatApis
 import h.Hchat.hooks.api.runtime.WeChatVersionApi
 import h.Hchat.preferences.HchatStorage
 import org.luckypray.dexkit.wrap.DexMethod
@@ -16,6 +17,12 @@ object DexMethodCache {
     }
 
     fun runtimeKey(context: Context, classLoader: ClassLoader): String {
+        // 优先复用 WeChatApis 里那份带 3 秒窗口的版本快照。
+        // 原来每次都直接 buildCacheKey → 完整 build 一遍：getPackageInfo 是跨进程调用，
+        // 还要 stat APK、反射读 BuildConfig、必要时递归扫 files/tinker 目录。
+        // 全仓 92 个调用点，冷启动就是几百次重复全量构建，白白拖慢启动、增加耗电。
+        val cachedKey = WeChatApis.version()?.cacheKey()
+        if (!cachedKey.isNullOrBlank()) return cachedKey
         return WeChatVersionApi.buildCacheKey(context, classLoader)
     }
 

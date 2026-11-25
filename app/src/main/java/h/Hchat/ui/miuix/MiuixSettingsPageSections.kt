@@ -267,6 +267,7 @@ import h.Hchat.hooks.items.fakescancamera.FakeScanCameraFeature
 import h.Hchat.hooks.items.fakescancamera.FakeScanCameraSettings
 import h.Hchat.hooks.items.fakevoiceduration.FakeVoiceDurationFeature
 import h.Hchat.hooks.items.fakevoiceduration.FakeVoiceDurationSettings
+import h.Hchat.hooks.items.sportstep.SportStepSettings
 import h.Hchat.hooks.items.forwardlimit.RemoveForwardLimitFeature
 import h.Hchat.hooks.items.forwardlimit.RemoveForwardLimitSettings
 import h.Hchat.hooks.items.gameemoji.GameEmojiFeature
@@ -1445,6 +1446,92 @@ internal fun FakeVoiceDurationMiuixPage(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun SportStepMiuixPage(
+    context: Context,
+    provider: FeatureSettingsProvider,
+    onBack: () -> Unit
+) {
+    val sp = remember { HchatStorage.preferences(context, SportStepSettings.PREFS_NAME) }
+    val listState = rememberLazyListState()
+    val scrollBehavior = MiuixScrollBehavior()
+    var enabled by remember {
+        mutableStateOf(
+            sp.getBoolean(SportStepSettings.KEY_ENABLE, SportStepSettings.DEFAULT_ENABLE)
+        )
+    }
+    var autoUpload by remember {
+        mutableStateOf(
+            sp.getBoolean(SportStepSettings.KEY_AUTO, SportStepSettings.DEFAULT_AUTO)
+        )
+    }
+    var step by remember {
+        mutableStateOf(
+            sp.getInt(SportStepSettings.KEY_STEP, SportStepSettings.DEFAULT_STEP).toString()
+        )
+    }
+
+    PageScaffold(
+        title = provider.title(),
+        largeTitle = provider.title(),
+        scrollBehavior = scrollBehavior,
+        bottomBar = { BottomActionBar("返回", onBack) }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
+            state = listState,
+            contentPadding = PaddingValues(
+                top = padding.calculateTopPadding() + 8.dp,
+                bottom = padding.calculateBottomPadding() + 84.dp
+            )
+        ) {
+            item { SmallTitle(text = "微信运动") }
+            item {
+                SettingsCard {
+                    SwitchRow(
+                        checked = enabled,
+                        title = "启用步数上报",
+                        summary = "通过设备步数通道上报自定义步数到运动排行榜",
+                        onCheckedChange = {
+                            enabled = it
+                            sp.edit().putBoolean(SportStepSettings.KEY_ENABLE, it).apply()
+                        }
+                    )
+                    if (enabled) {
+                        InsetDivider()
+                        SwitchRow(
+                            checked = autoUpload,
+                            title = "每日自动上报",
+                            summary = "每天首次满足条件时自动上报一次，失败自动重试",
+                            onCheckedChange = {
+                                autoUpload = it
+                                sp.edit().putBoolean(SportStepSettings.KEY_AUTO, it).apply()
+                            }
+                        )
+                        InsetDivider()
+                        NumberInputRow("目标步数", "0-100000，每日 ±3% 随机抖动", step) { next ->
+                            val value = next.toIntOrNull()
+                            step = value?.coerceIn(
+                                SportStepSettings.MIN_STEP,
+                                SportStepSettings.MAX_STEP
+                            )?.toString() ?: next
+                            if (value == null) return@NumberInputRow
+                            sp.edit().putInt(
+                                SportStepSettings.KEY_STEP,
+                                value.coerceIn(
+                                    SportStepSettings.MIN_STEP,
+                                    SportStepSettings.MAX_STEP
+                                )
+                            ).apply()
+                        }
+                    }
+                }
+            }
+            item { SmallTitle(text = "说明：微信需重启一次让运动模块加载完成；上报走官方设备通道，排行榜隔日刷新。") }
         }
     }
 }

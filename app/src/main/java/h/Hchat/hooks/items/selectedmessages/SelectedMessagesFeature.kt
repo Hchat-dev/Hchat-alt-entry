@@ -111,7 +111,7 @@ private class SelectedMessagesHooker(
             hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val activity = param.thisObject as? Activity ?: return
-                    if (moduleSender.handleRetransmitDone(activity)) param.result = null
+                    if (moduleSender.handleRetransmitDone(activity)) param.setResult(null)
                 }
             })
         }
@@ -147,7 +147,7 @@ private class SelectedMessagesHooker(
             MENU_SCHEDULE_ID -> MenuAction.SCHEDULE
             else -> return
         }
-        param.result = null
+        param.setResult(null)
         val activity = currentActivity()
         if (activity == null) return
         val selected = MultiSelectMessageResolver.resolve(param.thisObject)

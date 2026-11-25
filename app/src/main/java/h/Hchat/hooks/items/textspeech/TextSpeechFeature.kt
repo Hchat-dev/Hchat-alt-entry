@@ -54,7 +54,7 @@ class TextSpeechFeature : BaseFeature() {
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val event = param.args.getOrNull(0) as? KeyEvent ?: return
-                    if (runtime?.handleVolumeKey(event) == true) param.result = true
+                    if (runtime?.handleVolumeKey(event) == true) param.setResult(true)
                 }
             })
         }.onFailure {

@@ -90,7 +90,7 @@ private class FakeVoiceDurationRuntime(
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!FakeVoiceDurationFeature.isEnabled(context.hostContext())) return
-                    param.result = FakeVoiceDurationFeature.durationMillis(context.hostContext()).toLong()
+                    param.setResult(FakeVoiceDurationFeature.durationMillis(context.hostContext()).toLong())
                 }
             })
             installed = true

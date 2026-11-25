@@ -1,6 +1,11 @@
 # DexKit
 -keep class org.luckypray.dexkit.DexKitBridge { *; }
 
+# 日志与配置核心：HLog 是 Java 类，Kotlin 侧（设置页/日志页/各 Feature）通过静态方法
+# 读写 captureEnabled / CAPTURE 等静态字段。整类 keep，保证字段与方法不被 R8 改名/删除，
+# 多线程读写语义不被优化破坏（否则表现为「抓不到日志」「开关不生效」）。
+-keep class h.Hchat.utils.HLog { *; }
+
 # Miuix Nav/Compose resolves this composition local from library bytecode.
 -keep class androidx.lifecycle.viewmodel.compose.** { *; }
 
@@ -51,8 +56,12 @@
 -keep class me.yun.silk.** { *; }
 -keep class me.yun.silk.utils.** { *; }
 
-# Xposed
--keep class de.robv.android.xposed.** { *; }
+# Xposed（LibXposed API 102）
+-dontwarn io.github.libxposed.annotation.**
+-adaptresourcefilecontents META-INF/xposed/java_init.list
+-keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
+    public <init>();
+}
 -keep class h.Hchat.ModuleEntry { *; }
 -keep class h.Hchat.crash.NativeCrashBridge { *; }
 -keep class h.Hchat.crash.CrashExitInfoApi30 { *; }

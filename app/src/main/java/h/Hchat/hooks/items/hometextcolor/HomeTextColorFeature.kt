@@ -544,8 +544,11 @@ private class HomeTextColorRuntime(
         DexMethodCache.clear(methodPrefs, runtimeKey, CACHE_LAYOUT_INFLATER_FACTORY)
         if (!allowDexSearch) return null
 
+        var dexHits = 0
+        var loaded = 0
+        var loadedInstances: List<Method> = emptyList()
         val candidates = runCatching {
-            context.dexKitBridge().findMethod(
+            val data = context.dexKitBridge().findMethod(
                 FindMethod().apply {
                     matcher(
                         MethodMatcher().apply {
@@ -559,30 +562,88 @@ private class HomeTextColorRuntime(
                         }
                     )
                 }
-            ).mapNotNull { data ->
-                runCatching { data.getMethodInstance(context.hostClassLoader()) }.getOrNull()
-            }.filter(::isLayoutInflaterFactoryMethod)
+            )
+            dexHits = data.size
+            val instances = data.mapNotNull { item ->
+                runCatching { item.getMethodInstance(context.hostClassLoader()) }.getOrNull()
+            }
+            loaded = instances.size
+            loadedInstances = instances
+            instances.filter(::isLayoutInflaterFactoryMethod)
                 .distinctBy(::methodDescriptor)
         }.getOrElse {
             HLog.e("$TAG 定位微信布局创建入口失败: ${it.message}", it)
             emptyList()
         }
+        // 出现多个候选时优先生主包实现，避免因为多一个三方 Factory 就整体放弃。
         val method = candidates.singleOrNull()
+            ?: candidates.sortedByDescending { it.declaringClass.name.startsWith("com.tencent.mm.") }
+                .firstOrNull()
+            ?: locateLayoutInflaterFactoryRelaxed(loadedInstances, dexHits)
         if (method != null) {
             DexMethodCache.save(methodPrefs, runtimeKey, CACHE_LAYOUT_INFLATER_FACTORY, method)
         } else {
+            // 每个候选单独打一行拒绝原因：下一次日志能直接看出是哪一条判据没过，
+            // 而不是只有 count=0 的黑盒。dexHits>0 且全被拒时逐条打印。
             HLog.e(
                 "$TAG 未找到唯一微信布局创建入口: count=${candidates.size} " +
-                    "methods=${candidates.joinToString(transform = ::methodDescriptor)}"
+                    "dexHits=$dexHits loaded=$loaded methods=${candidates.joinToString(transform = ::methodDescriptor)}"
             )
+            loadedInstances.take(12).forEach { m: Method ->
+                HLog.e("$TAG 候选拒绝: ${describeLayoutInflaterCandidate(m)}")
+            }
         }
         return method
     }
 
+    /**
+     * 严格过滤全灭时的兜底：按名称级匹配（类名/参数名/返回名逐项比对字符串）。
+     * 存在 Class 同一性不成立（返回类型/参数类型来自不同 ClassLoader）导致的
+     * `==` 全灭，此时按名称比较仍能唯一命中微信自己的 Factory 实现。
+     */
+    private fun locateLayoutInflaterFactoryRelaxed(
+        instances: List<Method>,
+        dexHits: Int
+    ): Method? {
+        if (dexHits <= 0) return null
+        val relaxed = instances.filter(::isLayoutInflaterFactoryMethodByNames)
+        val method = relaxed.singleOrNull()
+            ?: relaxed.sortedByDescending { it.declaringClass.name.startsWith("com.tencent.mm.") }
+                .firstOrNull()
+        if (method != null) {
+            HLog.e("$TAG 严格匹配全灭（dexHits=$dexHits），按名称级兜底命中: ${methodDescriptor(method)}")
+        }
+        return method
+    }
+
+    private fun describeLayoutInflaterCandidate(method: Method): String {
+        val types = method.parameterTypes
+        val reasons = buildList {
+            if (method.name != "onCreateView") add("name!=onCreateView")
+            if (Modifier.isStatic(method.modifiers)) add("static")
+            if (Modifier.isAbstract(method.modifiers)) add("abstract")
+            if (method.returnType != View::class.java) {
+                add("returnType!=View(${method.returnType.name}=${method.returnType.classLoader})")
+            }
+            if (!types.contentEquals(arrayOf(String::class.java, Context::class.java, AttributeSet::class.java))) {
+                add("params!=S/C/A(${types.joinToString(",") { it.name }})")
+            }
+        }
+        return "${methodDescriptor(method)} 拒绝原因=${reasons.joinToString("|").ifEmpty { "包名排除(${method.declaringClass.name})" }}"
+    }
+
     private fun isLayoutInflaterFactoryMethod(method: Method): Boolean {
         val types = method.parameterTypes
+        val owner = method.declaringClass.name
         return method.name == "onCreateView" &&
-            method.declaringClass.name.startsWith("com.tencent.mm.ui.") &&
+            // 不能只认 com.tencent.mm.ui.*：微信混淆后宿主实现可能落到任意包，
+            // 硬过滤会把唯一候选滤掉，表现为 count=0。改为排除系统库与第三方 SDK。
+            !owner.startsWith("android.") &&
+            !owner.startsWith("androidx.") &&
+            !owner.startsWith("java.") &&
+            !owner.startsWith("com.facebook.") &&
+            !owner.startsWith("com.tencent.midas.") &&
+            !owner.startsWith("com.tencent.shadow.") &&
             !Modifier.isStatic(method.modifiers) &&
             !Modifier.isAbstract(method.modifiers) &&
             method.returnType == View::class.java &&
@@ -593,6 +654,27 @@ private class HomeTextColorRuntime(
                     AttributeSet::class.java
                 )
             )
+    }
+
+    /**
+     * 名称级匹配：与 [isLayoutInflaterFactoryMethod] 同一套结构判据，
+     * 但类型比较用「全限定名一致」代替 Class 同一性（==）。
+     * 宿主 ClassLoader 与模块视角下同名类若是不同 Class 对象，
+     * 严格版会全灭；名称版不受影响。
+     */
+    private fun isLayoutInflaterFactoryMethodByNames(method: Method): Boolean {
+        val owner = method.declaringClass.name
+        if (method.name != "onCreateView") return false
+        if (Modifier.isStatic(method.modifiers) || Modifier.isAbstract(method.modifiers)) return false
+        if (method.returnType.name != "android.view.View") return false
+        val names = method.parameterTypes.map { it.name }
+        if (names != listOf("java.lang.String", "android.content.Context", "android.util.AttributeSet")) return false
+        return !owner.startsWith("android.") &&
+            !owner.startsWith("androidx.") &&
+            !owner.startsWith("java.") &&
+            !owner.startsWith("com.facebook.") &&
+            !owner.startsWith("com.tencent.midas.") &&
+            !owner.startsWith("com.tencent.shadow.")
     }
 
     private fun installLayoutInflaterHook(method: Method?): Boolean {

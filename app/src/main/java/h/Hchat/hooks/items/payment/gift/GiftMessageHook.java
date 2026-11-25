@@ -56,7 +56,7 @@ public class GiftMessageHook {
 
                 XC_MethodHook.Unhook unhook = HookRegistry.get().hook(method, new XC_MethodHook() {
                     @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
+                    public void beforeHookedMethod(MethodHookParam param) {
                         Object[] args = param.args;
                         if (args == null) return;
                         for (Integer index : indexes) {

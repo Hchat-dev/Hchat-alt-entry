@@ -109,7 +109,7 @@ private class MomentsAutoForwardRuntime(
     private var deleteSubscription: WeChatDatabaseListenerApi.Subscription? = null
 
     fun start() {
-        loadHandledIds()
+        if (enabledState) loadHandledIds()
         synchronized(lifecycleLock) {
             if (enabledState) {
                 generation++
@@ -123,9 +123,31 @@ private class MomentsAutoForwardRuntime(
                 }
             }
         }
+        // 偏好监听必须先注册，用户之后打开开关时才能把订阅补上。
         prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
-        postSubscription = WeChatApis.snsApi()?.observePosts(::onPostStored)
-        deleteSubscription = WeChatApis.databaseChanges()?.subscribe(::onDatabaseChange)
+        refreshSubscriptions()
+    }
+
+    /**
+     * 按当前开关状态决定是否持有朋友圈动态与数据库订阅。
+     *
+     * 原实现无条件 `observePosts` + `subscribe`，功能关闭时每条 SnsInfo 写入
+     * 仍会回调进来；默认关闭的用户承担了全部开销却没有对应功能。
+     */
+    private fun refreshSubscriptions() {
+        if (!enabledState) {
+            postSubscription?.unsubscribe()
+            postSubscription = null
+            deleteSubscription?.unsubscribe()
+            deleteSubscription = null
+            return
+        }
+        if (postSubscription == null) {
+            postSubscription = WeChatApis.snsApi()?.observePosts(::onPostStored)
+        }
+        if (deleteSubscription == null) {
+            deleteSubscription = WeChatApis.databaseChanges()?.subscribe(::onDatabaseChange)
+        }
     }
 
     fun destroy() {
@@ -160,6 +182,8 @@ private class MomentsAutoForwardRuntime(
                 logger("保存朋友圈自动转发关闭状态失败", null)
             }
         }
+        // 状态确实变化时才重算订阅（上面状态未变会提前 return）。
+        refreshSubscriptions()
     }
 
     private fun beginEnabledSessionLocked() {

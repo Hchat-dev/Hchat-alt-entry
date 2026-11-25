@@ -20,6 +20,7 @@ import h.Hchat.hooks.core.FeatureContext
 import h.Hchat.hooks.core.HookRegistry
 import h.Hchat.hooks.items.messagetextcolor.MessageTextColorSettings
 import h.Hchat.preferences.HchatStorage
+import h.Hchat.preferences.HotConfig
 import h.Hchat.utils.HLog
 import h.Hchat.utils.KavaReflector
 import org.luckypray.dexkit.query.FindMethod
@@ -63,6 +64,21 @@ private class MessageBubbleRenderer(
         MessageTextColorSettings.PREFS_NAME
     )
     private val methodPrefs = DexMethodCache.prefs(context.hostContext(), METHOD_CACHE_PREFS)
+
+    /**
+     * 开关的热路径缓存。
+     *
+     * 原来 [bubbleEnabled] 虽然名字看着像缓存，实际每次都读一遍 SharedPreferences
+     * （拼两次字符串 + ConcurrentHashMap 查表 + FastKV 取锁）。它挂在全局消息绑定
+     * 的 before/after 上，**每条消息各调一次**，聊天列表滚动时每屏几十次。
+     */
+    private val bubbleEnabledFlag: () -> Boolean = HotConfig.flag(
+        MessageBubbleFeature.ID,
+        MessageBubbleSettings.KEY_ENABLE,
+        MessageBubbleSettings.DEFAULT_ENABLE
+    ) {
+        prefs.getBoolean(MessageBubbleSettings.KEY_ENABLE, MessageBubbleSettings.DEFAULT_ENABLE)
+    }
     private val holderRootFieldCache = ConcurrentHashMap<Class<*>, Field>()
     private val holderClickAreaFieldCache = ConcurrentHashMap<Class<*>, Field>()
     private val holderViewFieldsCache = ConcurrentHashMap<Class<*>, List<Field>>()
@@ -99,6 +115,10 @@ private class MessageBubbleRenderer(
         return runCatching {
             HookRegistry.get().hook(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    // 开关判断前置：这里挂的是全局消息绑定，每条消息都走一遍。
+                    // 关闭时若继续执行，会对每个 bind 参数做反射找 rootView，
+                    // 聊天列表滚动时白做几百次反射。
+                    if (!bubbleEnabled()) return
                     val state = captureBindState(param.args)
                     state.root?.let(::restoreBoundBubble)
                     val stack = bindStates.get() ?: ArrayDeque<BindState>().also(bindStates::set)
@@ -106,6 +126,7 @@ private class MessageBubbleRenderer(
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!bubbleEnabled()) return
                     val stack = bindStates.get()
                     val state = stack?.pollLast() ?: return
                     if (stack.isEmpty()) bindStates.remove()
@@ -121,6 +142,8 @@ private class MessageBubbleRenderer(
             false
         }
     }
+
+    private fun bubbleEnabled(): Boolean = bubbleEnabledFlag()
 
     private fun captureBindState(args: Array<Any?>?): BindState {
         val holder = args?.firstOrNull { it != null && findRootView(it) != null }
@@ -171,7 +194,7 @@ private class MessageBubbleRenderer(
             messageContent
         )
         if (targets.isEmpty()) return
-        if (!prefs.getBoolean(MessageBubbleSettings.KEY_ENABLE, MessageBubbleSettings.DEFAULT_ENABLE)) return
+        // 开关已在 before/after 首行判断过，这里不再重复读 prefs。
 
         val messageOutgoing = message?.let {
             parseInt(readMessageValue(it, "getIsSend", "field_isSend", "isSend"))?.let { value -> value != 0 }

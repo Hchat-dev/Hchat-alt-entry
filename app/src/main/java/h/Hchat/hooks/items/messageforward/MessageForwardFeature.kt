@@ -52,6 +52,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MessageForwardFeature : BaseFeature() {
     private var hooker: MessageForwardHooker? = null
     private var snsHooker: SnsForwardMenuHooker? = null
+    private var galleryLimit: GallerySelectLimit? = null
 
     override fun featureId(): String = ID
 
@@ -70,6 +71,7 @@ class MessageForwardFeature : BaseFeature() {
             onForward = { activity, snapshot -> hooker?.showSnsActions(activity, snapshot) },
             logger = ::logFeatureError
         )
+        galleryLimit = GallerySelectLimit(context, ::logFeatureError)
         scheduleInstall()
         subscribe(Events.DexReady::class.java) { scheduleInstall() }
     }
@@ -79,6 +81,7 @@ class MessageForwardFeature : BaseFeature() {
         hooker = null
         snsHooker?.destroy()
         snsHooker = null
+        galleryLimit = null
     }
 
     private fun scheduleInstall() {
@@ -87,6 +90,13 @@ class MessageForwardFeature : BaseFeature() {
         }
         DexInstallScheduler.schedule("${ID}_sns", "朋友圈转发") {
             snsHooker?.install() == true
+        }
+        // 图片上限与原生群发选择器是纯反射/Hook，类名不依赖 DexKit 结果，先装先用。
+        DexInstallScheduler.schedule("${ID}_gallery", "解除图片数量限制") {
+            galleryLimit?.install() == true
+        }
+        DexInstallScheduler.schedule("${ID}_mass_picker", "微信群发好友选择") {
+            hooker?.installNativePicker() == true
         }
     }
 
@@ -119,6 +129,10 @@ private class MessageForwardHooker(
     }
     private val systemShare = MessageForwardSystemShare(context)
     private val chatLivePhotoResolver = ChatLivePhotoResolver(context, logger)
+    private val nativePicker by lazy { NativeMassSendPicker(context, logger) }
+
+    /** 群发选择页的 Hook 与转发菜单相互独立，单独安装，失败也不影响转发本身。 */
+    fun installNativePicker(): Boolean = nativePicker.install()
 
     @Synchronized
     fun install(): Boolean {
@@ -268,7 +282,7 @@ private class MessageForwardHooker(
         if (!multiMomentsEnabled()) return
         val item = param.args?.firstNotNullOfOrNull { it as? MenuItem } ?: return
         if (item.itemId != MULTI_MOMENTS_MENU_ITEM_ID) return
-        param.result = null
+        param.setResult(null)
 
         val activity = currentActivity() ?: return
         val selected = MultiSelectMessageResolver.resolve(param.thisObject)
@@ -340,7 +354,7 @@ private class MessageForwardHooker(
         if (lastFavoriteHandledItem?.get() === item &&
             now - lastFavoriteHandledAt < FAVORITE_CLICK_DEDUP_MS
         ) return
-        param.result = null
+        param.setResult(null)
 
         val activity = currentActivity() ?: return
         val localId = favoriteBindingsByItem.remove(item)
@@ -509,6 +523,20 @@ private class MessageForwardHooker(
                     return@showChoices
                 }
                 val official = channel == SelectedMessagesRuntimeCoordinator.CHANNEL_OFFICIAL
+                if (official && nativePickerEnabled()) {
+                    val started = nativePicker.start(activity) { ids ->
+                        if (ids.isEmpty()) return@start
+                        sendFavorite(
+                            activity = activity,
+                            localId = localId,
+                            targetIds = ids,
+                            channel = channel,
+                            title = "群发助手"
+                        )
+                    }
+                    if (started) return@showChoices
+                    toast(activity, "微信群发选择页不可用，已改用模块选择器")
+                }
                 showContacts(
                     activity = activity,
                     friendsOnly = official,
@@ -1174,6 +1202,12 @@ private class MessageForwardHooker(
     }
 
     private fun chooseMassSendChannel(activity: Activity, snapshot: SelectedMessageSnapshot) {
+        // 文字消息且开启「文字走原生群发」时，不再问「模块通道 / 原生通道」，
+        // 直接用微信群发助手那一套：原生选人 + 原生队列。
+        if (isTextMessage(snapshot) && textNativeMassEnabled()) {
+            if (startNativeOfficialMassSend(activity, snapshot)) return
+            toast(activity, "微信群发选择页不可用，已改用模块选择器")
+        }
         VoiceForwardMiuixDialog.showChoices(
             activity = activity,
             title = "选择群发通道",
@@ -1193,11 +1227,20 @@ private class MessageForwardHooker(
                     toast(activity, it)
                     return@showChoices
                 }
-                val official = channel == SelectedMessagesRuntimeCoordinator.CHANNEL_OFFICIAL
+                // 原生通道优先用微信自己的选择页；拉不起来再退回模块选择器。
+                if (channel == SelectedMessagesRuntimeCoordinator.CHANNEL_OFFICIAL &&
+                    startNativeOfficialMassSend(activity, snapshot)
+                ) {
+                    return@showChoices
+                }
                 showContacts(
                     activity = activity,
-                    friendsOnly = official,
-                    title = if (official) "选择官方群发好友" else "选择群发对象",
+                    friendsOnly = channel == SelectedMessagesRuntimeCoordinator.CHANNEL_OFFICIAL,
+                    title = if (channel == SelectedMessagesRuntimeCoordinator.CHANNEL_OFFICIAL) {
+                        "选择官方群发好友"
+                    } else {
+                        "选择群发对象"
+                    },
                     confirmText = "发送"
                 ) { targets ->
                     sendSnapshots(activity, snapshot, targets.map { it.id }, channel, "群发助手")
@@ -1206,6 +1249,39 @@ private class MessageForwardHooker(
             onDismiss = {}
         )
     }
+
+    /**
+     * 拉起微信群发助手的好友选择页，选完由模块接管发送。
+     * 返回 true 表示已交给原生选择页；false 表示开关关闭或拉不起来，调用方应当降级。
+     */
+    private fun startNativeOfficialMassSend(
+        activity: Activity,
+        snapshot: SelectedMessageSnapshot
+    ): Boolean {
+        if (!nativePickerAllowedFor(snapshot)) return false
+        val channel = SelectedMessagesRuntimeCoordinator.CHANNEL_OFFICIAL
+        SelectedMessagesRuntimeCoordinator.snapshotValidationError(channel, listOf(snapshot))?.let {
+            toast(activity, it)
+            return false
+        }
+        return nativePicker.start(activity) { ids ->
+            if (ids.isEmpty()) return@start
+            sendSnapshots(activity, snapshot, ids, channel, "群发助手")
+        }
+    }
+
+    private fun nativePickerEnabled(): Boolean =
+        prefs.getBoolean(MessageForwardSettings.KEY_NATIVE_MASS_PICKER, false)
+
+    /** 「文字走原生群发」独立开关：只对文字消息生效，不需要再开上面的总开关。 */
+    private fun textNativeMassEnabled(): Boolean =
+        prefs.getBoolean(MessageForwardSettings.KEY_TEXT_NATIVE_MASS, false)
+
+    private fun nativePickerAllowedFor(snapshot: SelectedMessageSnapshot): Boolean =
+        nativePickerEnabled() || (textNativeMassEnabled() && isTextMessage(snapshot))
+
+    private fun isTextMessage(snapshot: SelectedMessageSnapshot): Boolean =
+        (snapshot.type and 0xffff) == MESSAGE_TYPE_TEXT
 
     private fun chooseLabels(activity: Activity, snapshot: SelectedMessageSnapshot) {
         chooseLabelTargets(activity) { targetIds ->
@@ -1641,6 +1717,7 @@ private class MessageForwardHooker(
         private const val SNS_FORWARD_MENU_TITLE = "转发[H]"
         private const val SNS_UPLOAD_ACTIVITY = "com.tencent.mm.plugin.sns.ui.SnsUploadUI"
         private const val MAX_MOMENTS_IMAGES = 9
+        private const val MESSAGE_TYPE_TEXT = 1
         private val MOMENTS_VIDEO_TYPES = setOf(WeChatMessageTypes.VIDEO, 62)
     }
 }

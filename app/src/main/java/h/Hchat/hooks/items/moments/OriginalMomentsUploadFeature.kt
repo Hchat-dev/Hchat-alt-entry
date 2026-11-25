@@ -128,11 +128,11 @@ private class OriginalMomentsUploadHooker(
         val targetName = args[2] as? String ?: return
         if (dir.isBlank() || sourcePath.isBlank() || targetName.isBlank()) return
         if (convertWithoutZip(sourcePath, dir + targetName)) {
-            param.result = true
+            param.setResult(true)
             return
         }
         if (copyWithWechatVfs(dir, sourcePath, targetName)) {
-            param.result = true
+            param.setResult(true)
         }
     }
 

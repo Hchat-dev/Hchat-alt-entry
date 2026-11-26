@@ -1660,12 +1660,17 @@ object ConversationGroupRuntime {
             val state = loadConversationParents(database, emptySet())
             val official = state.officialIds(originals)
             val plan = ConversationGroupParentPolicy.plan(
-                assigned = state.parents.filterKeys { it !in official },
+                assigned = emptyMap(),
                 current = state.parents,
                 protected = official,
                 originals = originals
             )
-            applyParentPlan(database, prefs, account, plan)
+            val restored = applyParentPlan(database, prefs, account, plan)
+            if (!isRuntimeGenerationActive(generation) || ConversationGroupStore.accountKey() != account) return
+            if (plan.unresolved.isEmpty() && restored.containsAll(plan.updates.keys)) {
+                cleanupVirtualRows(database, emptySet())
+            }
+            ConversationGroupHomeProjection.refresh()
             return
         }
         val automaticResolution = if (enabled) {

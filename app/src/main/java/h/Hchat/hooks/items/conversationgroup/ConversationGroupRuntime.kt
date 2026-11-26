@@ -1657,17 +1657,17 @@ object ConversationGroupRuntime {
             }
             try {
                 val state = loadConversationParents(database, emptySet())
+                val official = state.officialIds(originals)
                 val plan = ConversationGroupParentPolicy.plan(
                     assigned = emptyMap(),
                     current = state.parents,
-                    protected = emptySet(),
+                    protected = official,
                     originals = originals
                 )
                 if (!isRuntimeGenerationActive(generation)) return
-                val parentUpdatesSucceeded = applyParentPlan(database, prefs, account, plan)
-                // Keep virtual parents until every real conversation has been restored.
-                if (plan.unresolved.isEmpty() && parentUpdatesSucceeded.containsAll(plan.updates.keys) &&
-                    isRuntimeGenerationActive(generation) && ConversationGroupStore.accountKey() == account &&
+                val restored = applyParentPlan(database, prefs, account, plan)
+                if (!isRuntimeGenerationActive(generation) || ConversationGroupStore.accountKey() != account) return
+                if (plan.unresolved.isEmpty() && restored.containsAll(plan.updates.keys) &&
                     !ConversationGroupStore.isEnabled(context)
                 ) {
                     cleanupVirtualRows(database, emptySet())
